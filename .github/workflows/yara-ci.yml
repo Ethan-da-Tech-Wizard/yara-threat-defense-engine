@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install System Dependencies (YARA & ClamAV)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y yara clamav clamav-freshclam
+          sudo freshclam || true
+
+      - name: Verify YARA Ruleset Integrity & Ahead-of-Time AST Compilation
+        run: |
+          python3 scripts/twu_yara_vet.py verify
+
+      - name: Run Test Suite
+        run: |
+          python3 -m unittest scripts/test_twu_scan.py scripts/test_twu_yara_vet.py scripts/test_twu_scan_event.py

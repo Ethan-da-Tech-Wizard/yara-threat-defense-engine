@@ -1,0 +1,76 @@
+{
+ "version": 1,
+ "note": "Rules disabled at scan time (matches by these names are ignored by scripts/twu_scan.py). Vendored files stay byte-identical to upstream so MANIFEST sha256 holds.",
+ "corpus": {
+  "date": "2026-11-07",
+  "host": "REDACTED (macOS)",
+  "files": 11272,
+  "contents": "/usr/bin /bin /usr/sbin /sbin /usr/libexec; 600 random /Applications + /System/Applications app binaries and frameworks; python3 stdlib; ~/.local/bin, ~/.local/opt, ~/.local/lib; node; this repo's scripts/ and docs/",
+  "result_before_exclusions": "7 rules fired, all on files inside this repo; 0 fired on any macOS system file, app binary, or python stdlib file",
+  "result_after_exclusions": "0 rules fire on clean non-fixture files"
+ },
+ "excluded": [
+  {
+   "rule": "Persistence_Agent_MacOS",
+   "file": "vendor/signature-base/yara/gen_osx_pyagent_persistence.yar",
+   "fired_on": [
+    "scripts/pair.py",
+    "scripts/magi_boot_orchestrator.py",
+    "scripts/twu_dashboard.py",
+    "scripts/twu_keeper.py"
+   ],
+   "why": "Loose heuristic (python shebang plus plist/ProgramArguments/RunAtLoad words). Fires on any legitimate Python script that installs a LaunchAgent, including ours."
+  }
+ ],
+ "kept_fixture_hits": [
+  {
+   "rule": "SUSP_shellpop_Bash",
+   "fired_on": 7,
+   "why": "Security test files that contain reverse-shell payload text on purpose. Correct behavior; rule kept."
+  },
+  {
+   "rule": "EXT_WEBSHELL_PHP_Generic",
+   "fired_on": 1,
+   "why": "scripts/test_twu_yara.py holds a webshell sample string as a fixture. Rule kept."
+  },
+  {
+   "rule": "WEBSHELL_PHP_Generic_Eval",
+   "fired_on": 1,
+   "why": "same fixture; rule kept."
+  },
+  {
+   "rule": "WEBSHELL_PHP_Dynamic_Big",
+   "fired_on": 1,
+   "why": "same fixture; rule kept."
+  },
+  {
+   "rule": "CoinMiner_Strings",
+   "fired_on": 1,
+   "why": "scripts/test_twu_yara.py miner fixture; rule kept."
+  },
+  {
+   "rule": "PUA_Crypto_Mining_CommandLine_Indicators_Oct21",
+   "fired_on": 1,
+   "why": "scripts/test_sentinel_killer_daemon.py contains miner command lines as test data; rule kept."
+  }
+ ],
+ "rejected_license": [
+  {
+   "source": "Yara-Rules/rules (0f93570)",
+   "license": "GPL-2.0",
+   "why": "AGENTS.md open-source rule refuses GPL-2.0-only (incompatible with GPL-3.0). Not vendored."
+  },
+  {
+   "source": "YARAHQ/yara-forge",
+   "license": "packages built from many upstreams",
+   "why": "Output is a release asset bundle not pinned to a repo commit with one license; skipped. signature-base and ReversingLabs are its main upstreams and are vendored directly."
+  }
+ ],
+ "fixtures": [
+  {
+   "path": "scripts/test_twu_yara.py",
+   "sha256": "195f537f6b09f6769b3d905ec5928917047c216e4f44b95d34f9bfcc6d3a0891",
+   "why": "Contains webshell/coin-miner/reverse-shell text on purpose to test the YARA rules. Pinned by path + sha256: any edit makes it scan again."
+  }
+ ]
+}
