@@ -1,58 +1,68 @@
 #!/usr/bin/env python3
-"""twu_scan_event: Event-Driven File Security Scanner and Forensic Alert Staging.
+## ==============================================================================
+## TWU THREAT DEFENSE ENGINE: EVENT-DRIVEN SCANNER & ALERT STAGING
+## ==============================================================================
+## Author: Ethan REDACTED <ethan@REDACTED>
+## Organization: TWU LLC
+## Copyright: (c) 2026 Ethan REDACTED, TWU LLC
+## License: MIT License 2026
+##
+## EDUCATIONAL ARCHITECTURE: EVENT-DRIVEN THREAT DETECTION & QUARANTINE STAGING
+## ------------------------------------------------------------------------------
+## Traditional antivirus architectures frequently rely on continuous filesystem
+## polling or heavyweight kernel filesystem filter drivers. In constrained,
+## high-security, or containerized environments, these approaches present major
+## drawbacks: high idle CPU usage, battery drain, memory leaks, and kernel panics.
+##
+## This module demonstrates an event-driven, zero-daemon scanning architecture:
+##
+## 1. Passive Event Hook Integration:
+##    - Integrates natively with operating system notification facilities:
+##      systemd `.path` units on Linux, `launchd` `WatchPaths` on macOS, or
+##      file synchronization hooks (such as Syncthing folder change events).
+##    - Near-zero idle CPU: The process executes only when filesystem events fire,
+##      scans new/modified files, persists state, and immediately terminates.
+##
+## 2. I/O Race Prevention & Write Stability (Debouncing):
+##    - Files arriving via network sync or browser downloads are often written
+##      incrementally across several seconds. Scanning a file mid-write yields
+##      corrupted hashes, false COULD-NOT-SCAN errors, or false negatives.
+##    - Mechanism: We capture a high-resolution stat signature `(st_size, st_mtime_ns)`.
+##      After a single shared wait interval (default 2.0s), we re-verify the snapshot.
+##      If the file is still changing, it is gracefully deferred to the next event pass.
+##
+## 3. State Deduplication & Scalable Inode Tracking:
+##    - Retains a persistent cache mapping `file_path -> [st_size, st_mtime_ns]`.
+##    - Repeated events on existing files bypass rescanning in microseconds,
+##      preventing redundant compute load while preserving instant responsiveness.
+##
+## 4. Non-Destructive Quarantine Staging:
+##    - Automated scripts should NEVER silently delete or alter flagged files.
+##      Premature deletion destroys forensic evidence required for incident
+##      response, reverse engineering, and threat attribution.
+##    - Staging Pattern: The file remains untouched in place; permissions can be
+##      restricted, and structured forensic alerts (`scan_alerts.<host>.json`)
+##      are dispatched atomically for human security review.
+##
+## 5. Safe Model Header Scanning (GGUF Tensors):
+##    - Machine learning weights (GGUF, Safetensors) are frequently 10 GB - 70 GB.
+##      Full memory-mapping or hashing of these files risks immediate Out-Of-Memory
+##      (OOM) crashes and system freezes.
+##    - `gguf_header_scan` inspects only the first 16 MiB of the file header,
+##      where metadata, embedded scripts, and malicious loader structures reside,
+##      providing fast heuristic screening without exhausting host RAM.
+##
+## 6. Removable Media (USB) Containment:
+##    - Removable drives present physical attack vectors (e.g. BadUSB, AutoRun worms).
+##    - Employs strict directory depth limits (depth=3) and file count caps (max 5000)
+##      to prevent zip bombs, directory traversal loops, or denial-of-service.
+## ==============================================================================
 
-===============================================================================
-EDUCATIONAL CONCEPT: EVENT-DRIVEN THREAT DETECTION & QUARANTINE STAGING
-===============================================================================
-Traditional antivirus architectures frequently rely on continuous filesystem
-polling or heavyweight kernel filesystem filter drivers. In constrained,
-high-security, or containerized environments, these approaches present major
-drawbacks: high idle CPU usage, battery drain, memory leaks, and kernel panics.
+"""twu_scan_event: Event-Driven File Security Scanner and Forensic Alert Staging."""
 
-This module demonstrates an event-driven, zero-daemon scanning architecture:
-
-1. Passive Event Hook Integration:
-   - Integrates natively with operating system notification facilities:
-     systemd `.path` units on Linux, `launchd` `WatchPaths` on macOS, or
-     file synchronization hooks (such as Syncthing folder change events).
-   - Near-zero idle CPU: The process executes only when filesystem events fire,
-     scans new/modified files, persists state, and immediately terminates.
-
-2. I/O Race Prevention & Write Stability (Debouncing):
-   - Files arriving via network sync or browser downloads are often written
-     incrementally across several seconds. Scanning a file mid-write yields
-     corrupted hashes, false COULD-NOT-SCAN errors, or false negatives.
-   - Mechanism: We take a cryptographic timestamp/size snapshot `(st_size, st_mtime_ns)`.
-     After a single shared wait interval (default 2.0s), we re-verify the snapshot.
-     If the file is still changing, it is gracefully deferred to the next event.
-
-3. State Deduplication & Scalable Inode Tracking:
-   - Retains a persistent cache mapping `file_path -> [st_size, st_mtime_ns]`.
-   - Repeated events on existing files bypass rescanning in microseconds,
-     preventing redundant compute load while preserving instant responsiveness.
-
-4. Non-Destructive Quarantine Staging:
-   - Automated scripts should NEVER silently delete or alter flagged files.
-     Premature deletion destroys forensic evidence required for incident
-     response, reverse engineering, and threat attribution.
-   - Staging Pattern: The file remains untouched in place; permissions can be
-     restricted, and structured forensic alerts (`scan_alerts.<host>.json`)
-     are dispatched atomically for human security review.
-
-5. Safe Model Header Scanning (GGUF Tensors):
-   - Machine learning weights (GGUF, Safetensors) are frequently 10 GB - 70 GB.
-     Full memory-mapping or hashing of these files risks immediate Out-Of-Memory
-     (OOM) crashes and system freezes.
-   - `gguf_header_scan` inspects only the first 16 MiB of the file header,
-     where metadata, embedded scripts, and malicious loader structures reside,
-     providing fast heuristic screening without exhausting host RAM.
-
-6. Removable Media (USB) Containment:
-   - Removable drives present physical attack vectors (e.g. BadUSB, AutoRun worms).
-   - Employs strict directory depth limits (depth=3) and file count caps (max 5000)
-     to prevent zip bombs, directory traversal loops, or denial-of-service.
-"""
-
+## -----------------------------------------------------------------------------
+## SECTION 1: IMPORTS & GLOBAL CONFIGURATION CONSTANTS
+## -----------------------------------------------------------------------------
 import argparse
 import json
 import os
@@ -63,42 +73,58 @@ import tempfile
 import time
 from pathlib import Path
 
-# Base directory setup: Anchors to repository root
+## Base directory setup: Anchors to repository root
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 import twu_scan  # noqa: E402
 
-# Node identification for multi-device cluster tracking
+## Node identification for multi-device cluster tracking
 HOST = platform.node().split(".")[0] or "host"
 
-# -----------------------------------------------------------------------------
-# Configuration Constants & Operational Guardrails
-# -----------------------------------------------------------------------------
-MAX_ALERTS = 50                      # Maximum alert history retained in rolling alert log
-MAX_STATE = 5000                     # Maximum file paths tracked in deduplication cache
-DEFAULT_MAX_BYTES = 500 * 1024 * 1024  # 500 MiB upper limit for event-triggered files
-STABLE_SECONDS = 2.0                 # Debounce interval to ensure file writes completed
-GGUF_HEADER_BYTES = 16 * 1024 * 1024  # 16 MiB window for scanning ML model headers
-USB_DEPTH = 3                        # Maximum directory depth scanned on external media
-USB_MAX_FILES = 5000                 # Maximum file count threshold for USB drives
+## Operational guardrails and thresholds
+MAX_ALERTS = 50                      ## Maximum alert history retained in rolling alert log
+MAX_STATE = 5000                     ## Maximum file paths tracked in deduplication cache
+DEFAULT_MAX_BYTES = 500 * 1024 * 1024  ## 500 MiB upper limit for event-triggered files
+STABLE_SECONDS = 2.0                 ## Debounce interval to ensure file writes completed
+GGUF_HEADER_BYTES = 16 * 1024 * 1024  ## 16 MiB window for scanning ML model headers
+USB_DEPTH = 3                        ## Maximum directory depth scanned on external media
+USB_MAX_FILES = 5000                 ## Maximum file count threshold for USB drives
 
-# Directory segments and filenames excluded from event processing
+## Directory segments and filenames excluded from event processing
 SKIP_PARTS = (".git", ".stversions", ".stfolder", ".hg", ".svn")
 SKIP_NAMES = (".DS_Store", ".stignore", ".stfolder")
 RANK = twu_scan.VERDICT_RANK
 
 
 def _stamp(t=None):
-    """Format local timestamp for standard operational logging."""
+    """Format local timestamp for standard operational logging.
+
+    Parameters:
+        t (float | None): Epoch timestamp.
+
+    Returns:
+        str: YYYY-MM-DD HH:MM:SS formatted string.
+    """
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t or time.time()))
 
 
 def _worse(a, b):
-    """Compare two threat verdicts and return the one with higher severity rank."""
+    """Compare two threat verdicts and return the one with higher severity rank.
+
+    Parameters:
+        a (str): First verdict string.
+        b (str): Second verdict string.
+
+    Returns:
+        str: Higher-ranking verdict.
+    """
     return a if RANK[a] >= RANK[b] else b
 
 
+## -----------------------------------------------------------------------------
+## SECTION 2: INTERNAL FILE & VCS FILTERING
+## -----------------------------------------------------------------------------
 def skip_reason(path, root=REPO):
     """Filter out internal control files, VCS metadata, and temporary artifacts.
 
@@ -106,16 +132,23 @@ def skip_reason(path, root=REPO):
     If an event scanner flags its own scan receipts, log files, or YARA rule files,
     it could trigger an infinite loop of filesystem events. This function filters
     out all known internal artifacts before any disk I/O occurs.
+
+    Parameters:
+        path (str): Candidate file path.
+        root (Path | str): Workspace root.
+
+    Returns:
+        str | None: String reason if file should be skipped, else None.
     """
     p = os.path.abspath(path)
     parts = Path(p).parts
     base = os.path.basename(p)
 
-    # 1. Skip VCS internal metadata and version control history
+    ## 1. Skip VCS internal metadata and version control history
     if any(x in SKIP_PARTS for x in parts):
         return "inside .git / Syncthing versions"
 
-    # 2. Skip temporary partial downloads or OS clutter
+    ## 2. Skip temporary partial downloads or OS clutter
     if (
         base in SKIP_NAMES
         or base.startswith(".syncthing.")
@@ -125,28 +158,47 @@ def skip_reason(path, root=REPO):
     ):
         return "temporary or bookkeeping file"
 
-    # 3. Skip scanner's own receipts and rule directories
+    ## 3. Skip scanner's own receipts and rule directories
     r = os.path.abspath(str(root))
     for rel in ("data/health/scans", "data/yara_rules"):
         d = os.path.join(r, rel)
         if p == d or p.startswith(d + os.sep):
             return "our own receipts or rules"
 
-    # 4. Skip scanner health monitoring records
+    ## 4. Skip scanner health monitoring records
     if p.startswith(os.path.join(r, "data", "health") + os.sep) and base.startswith("scan_"):
         return "our own receipts or rules"
 
     return None
 
 
+## -----------------------------------------------------------------------------
+## SECTION 3: STAT SIGNATURE & DEBOUNCE STABILIZATION
+## -----------------------------------------------------------------------------
 def _sig(path):
-    """Generate high-resolution stat signature: (size_in_bytes, mtime_in_nanoseconds)."""
+    """Generate high-resolution stat signature: (size_in_bytes, mtime_in_nanoseconds).
+
+    Parameters:
+        path (str): Target file path.
+
+    Returns:
+        tuple[int, int]: (file_size_bytes, mtime_nanoseconds)
+    """
     st = os.lstat(path)
     return st.st_size, int(st.st_mtime_ns)
 
 
 def _stable(path, wait, sleeper):
-    """Determine if a single file has completed writing by checking stat drift."""
+    """Determine if a single file has completed writing by checking stat drift.
+
+    Parameters:
+        path (str): File path to verify.
+        wait (float): Delay interval in seconds.
+        sleeper (callable): Sleep function hook.
+
+    Returns:
+        bool: True if stat signature remained identical across the wait window.
+    """
     try:
         a = _sig(path)
         if wait:
@@ -157,22 +209,48 @@ def _stable(path, wait, sleeper):
 
 
 def _state_path(root):
-    """Return path to host-specific deduplication cache file."""
+    """Return path to host-specific deduplication cache file.
+
+    Parameters:
+        root (Path | str): Workspace root.
+
+    Returns:
+        Path: Path to scan_event_state.<host>.json
+    """
     return Path(root) / "data" / "health" / ("scan_event_state.%s.json" % HOST)
 
 
 def _load(path, default):
-    """Safely load JSON file with automatic fallback on missing or corrupt files."""
+    """Safely load JSON file with automatic fallback on missing or corrupt files.
+
+    Parameters:
+        path (Path | str): Target JSON file.
+        default (any): Value to return on read/parse error.
+
+    Returns:
+        Parsed JSON object or default value.
+    """
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
 
 
+## -----------------------------------------------------------------------------
+## SECTION 4: INCIDENT FORMATTING & ALERT DISPATCH
+## -----------------------------------------------------------------------------
 def sentence(path, verdict, findings):
     """Format human-readable alert notification guidance for security operators.
 
     Reinforces non-destructive incident response: Never delete blindly.
+
+    Parameters:
+        path (str): Flagged file path.
+        verdict (str): 'SUSPICIOUS' or 'INFECTED'.
+        findings (list[dict]): Findings list from engine execution.
+
+    Returns:
+        str: Human-readable guidance message.
     """
     names = ", ".join(sorted({f.get("name", "?") for f in findings})[:4]) or "a scanner match"
     kind = "matched a virus signature" if verdict == "INFECTED" else "matched a suspicious-file rule"
@@ -186,6 +264,14 @@ def write_alerts(root, new_alerts, now=None):
     """Atomically append new security incidents to rolling alert history log.
 
     Maintains the most recent `MAX_ALERTS` alerts sorted newest-first.
+
+    Parameters:
+        root (Path | str): Workspace root.
+        new_alerts (list[dict]): Newly generated alert records.
+        now (float | None): Epoch timestamp.
+
+    Returns:
+        str | None: Path to written alert file or None if no alerts.
     """
     if not new_alerts:
         return None
@@ -210,13 +296,25 @@ LAST_PASS_KEY = "__last_pass__"
 
 
 def load_last_pass(root):
-    """Retrieve timestamp of last successful directory expansion pass."""
+    """Retrieve timestamp of last successful directory expansion pass.
+
+    Parameters:
+        root (Path | str): Repository root.
+
+    Returns:
+        float: Epoch timestamp of prior pass or 0.0.
+    """
     v = _load(_state_path(root), {}).get(LAST_PASS_KEY)
     return float(v) if isinstance(v, (int, float)) else 0.0
 
 
 def save_last_pass(root, ts):
-    """Record timestamp of current directory expansion pass."""
+    """Record timestamp of current directory expansion pass.
+
+    Parameters:
+        root (Path | str): Repository root.
+        ts (float): Epoch timestamp to record.
+    """
     p = _state_path(root)
     st = _load(p, {})
     st[LAST_PASS_KEY] = ts
@@ -226,6 +324,9 @@ def save_last_pass(root, ts):
         pass
 
 
+## -----------------------------------------------------------------------------
+## SECTION 5: BOUNDED DIRECTORY EXPANSION FOR EVENT HOOKS
+## -----------------------------------------------------------------------------
 def expand_dirs(dirs, since_days=1.0, depth=4, max_files=2000, now=None, since_ts=0.0, root=None):
     """Expand directory trees into changed file candidates for batch event hooks.
 
@@ -234,6 +335,18 @@ def expand_dirs(dirs, since_days=1.0, depth=4, max_files=2000, now=None, since_t
     do not provide the specific list of modified file paths.
     This function performs a bounded depth-limited traversal, collecting files
     modified since the last successful pass timestamp.
+
+    Parameters:
+        dirs (list[str]): Directories to traverse.
+        since_days (float): Maximum lookback window in days.
+        depth (int): Maximum directory depth.
+        max_files (int): Hard cap on collected files.
+        now (float | None): Current epoch timestamp.
+        since_ts (float): Minimum timestamp threshold from prior pass.
+        root (Path | str | None): Repository root for skipping relative paths.
+
+    Returns:
+        list[str]: Candidate file paths matching modification criteria.
     """
     cutoff = max((now or time.time()) - since_days * 86400, since_ts)
     skip_rel = [os.path.abspath(os.path.join(str(root), r)) for r in EXPAND_SKIP_REL] if root else []
@@ -259,6 +372,9 @@ def expand_dirs(dirs, since_days=1.0, depth=4, max_files=2000, now=None, since_t
     return out
 
 
+## -----------------------------------------------------------------------------
+## SECTION 6: CORE EVENT PROCESSING PIPELINE
+## -----------------------------------------------------------------------------
 def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=STABLE_SECONDS,
              sleeper=time.sleep, timeout=twu_scan.DEFAULT_TIMEOUT, **scan_kw):
     """Core event processing pipeline: filter, debounce, deduplicate, and scan.
@@ -276,6 +392,18 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
     6. Forensic Alerting & State Update: For any SUSPICIOUS or INFECTED file,
        generate an immutable alert record. Update deduplication cache for
        all successfully evaluated files.
+
+    Parameters:
+        paths (list[str]): Triggered file paths.
+        root (Path | str): Workspace root.
+        scanner (callable | None): Scanner function (defaults to twu_scan.scan).
+        max_bytes (int): Upper bound on file size.
+        wait (float): Debounce interval in seconds.
+        sleeper (callable): Sleep implementation (for testing).
+        timeout (int): Per-scan subprocess timeout.
+
+    Returns:
+        dict: {verdict, scanned, skipped, receipt, alerts_file}
     """
     scanner = scanner or twu_scan.scan
     root = Path(root)
@@ -283,7 +411,7 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
     state = _load(state_p, {})
     skipped, todo = [], []
     seen = set()
-    pending = {}  # Map of path -> (size, mtime_ns) before shared wait
+    pending = {}  ## Map of path -> (size, mtime_ns) before shared wait
 
     for raw in paths:
         p = os.path.abspath(raw)
@@ -299,7 +427,7 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
                 elif not stat.S_ISREG(st.st_mode):
                     why = "not a regular file"
                 elif st.st_size > max_bytes:
-                    todo.append(p)  # Let twu_scan report COULD-NOT-SCAN for oversized files
+                    todo.append(p)  ## Let twu_scan report COULD-NOT-SCAN for oversized files
                     continue
                 else:
                     pending[p] = _sig(p)
@@ -308,7 +436,7 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
         if why:
             skipped.append({"path": p, "why": why})
 
-    # Execute single batch stabilization delay
+    ## Execute single batch stabilization delay for all pending files
     if pending and wait:
         sleeper(wait)
 
@@ -344,14 +472,14 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
                     "receipt": receipt,
                     "sentence": sentence(f["path"], f["verdict"], f.get("findings", [])),
                 })
-            # Successfully scanned files are added to state; COULD-NOT-SCAN remains eligible for retry
+            ## Successfully scanned files are added to state; COULD-NOT-SCAN remains eligible for retry
             if f["verdict"] != "COULD-NOT-SCAN":
                 try:
                     state[f["path"]] = list(_sig(f["path"]))
                 except OSError:
                     pass
 
-        # Evict oldest state cache entries if size exceeds MAX_STATE limit
+        ## Evict oldest state cache entries if size exceeds MAX_STATE limit
         if len(state) > MAX_STATE:
             for k in [k for k in state if k != LAST_PASS_KEY][:len(state) - MAX_STATE]:
                 del state[k]
@@ -370,9 +498,9 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
     }
 
 
-# -----------------------------------------------------------------------------
-# Large Asset Security: GGUF Model Header Pass
-# -----------------------------------------------------------------------------
+## -----------------------------------------------------------------------------
+## SECTION 7: LARGE ASSET SECURITY: GGUF MODEL HEADER PASS
+## -----------------------------------------------------------------------------
 def gguf_header_scan(path, scanner=None, nbytes=GGUF_HEADER_BYTES, root=REPO):
     """Scan the initial binary header of large GGUF AI model weights.
 
@@ -384,6 +512,15 @@ def gguf_header_scan(path, scanner=None, nbytes=GGUF_HEADER_BYTES, root=REPO):
     the beginning of the file. By extracting and scanning only the first 16 MiB,
     we achieve fast heuristic security screening while maintaining a strict
     RAM ceiling.
+
+    Parameters:
+        path (str): Path to large model checkpoint.
+        scanner (callable | None): Scanner function.
+        nbytes (int): Number of header bytes to extract and scan.
+        root (Path | str): Workspace root.
+
+    Returns:
+        dict: {path, verdict, bytes_scanned, file_bytes, partial, findings, note}
     """
     scanner = scanner or twu_scan.scan
     size = os.path.getsize(path)
@@ -406,11 +543,18 @@ def gguf_header_scan(path, scanner=None, nbytes=GGUF_HEADER_BYTES, root=REPO):
     }
 
 
-# -----------------------------------------------------------------------------
-# Removable Media (USB) Containment
-# -----------------------------------------------------------------------------
+## -----------------------------------------------------------------------------
+## SECTION 8: REMOVABLE MEDIA (USB) CONTAINMENT
+## -----------------------------------------------------------------------------
 def list_volumes(base=None):
-    """Discover mounted removable media partitions across Linux and macOS."""
+    """Discover mounted removable media partitions across Linux and macOS.
+
+    Parameters:
+        base (str | None): Base mount directory override.
+
+    Returns:
+        list[str]: Discovered removable media partition mount paths.
+    """
     bases = [base] if base else ["/Volumes", "/media", "/run/media"]
     out = []
     for b in bases:
@@ -419,10 +563,10 @@ def list_volumes(base=None):
         for n in sorted(os.listdir(b)):
             p = os.path.join(b, n)
             if os.path.islink(p):
-                continue  # e.g. /Volumes/Macintosh HD is a symlink to root
+                continue  ## e.g. /Volumes/Macintosh HD is a symlink to root
             if os.path.isdir(p) and (base or b != "/run/media"):
                 out.append(p)
-            elif os.path.isdir(p):  # Linux multi-user mount: /run/media/<user>/<label>
+            elif os.path.isdir(p):  ## Linux multi-user mount: /run/media/<user>/<label>
                 out += [
                     os.path.join(p, m)
                     for m in sorted(os.listdir(p))
@@ -438,6 +582,17 @@ def usb_scan(volumes=None, root=REPO, scanner=None, depth=USB_DEPTH, max_files=U
     - Max recursion depth: depth=3
     - Max files scanned: max_files=5000
     - Autorun detection: Explicitly flags Windows autorun files.
+
+    Parameters:
+        volumes (list[str] | None): Specific volume mount paths.
+        root (Path | str): Workspace root.
+        scanner (callable | None): Scanner function.
+        depth (int): Max directory depth.
+        max_files (int): Max total files.
+        max_bytes (int): Upper bound on file size.
+
+    Returns:
+        dict: {volumes, verdict, files, warnings, too_deep, over_cap, receipt, alerts_file}
     """
     scanner = scanner or twu_scan.scan
     vols = list(volumes) if volumes else list_volumes()
@@ -500,7 +655,15 @@ def usb_scan(volumes=None, root=REPO, scanner=None, depth=USB_DEPTH, max_files=U
 
 
 def _render(res, label):
-    """Format event scan or USB scan results for CLI output."""
+    """Format event scan or USB scan results for CLI output.
+
+    Parameters:
+        res (dict): Result dictionary from scan_new or usb_scan.
+        label (str): Subcommand label.
+
+    Returns:
+        str: Human-readable terminal string.
+    """
     lines = ["VERDICT: %s" % res["verdict"]]
     for f in res.get("scanned", res.get("files", [])):
         lines.append("%s: %s" % (f["verdict"], f["path"]))
@@ -519,11 +682,22 @@ def _render(res, label):
     return "\n".join(lines)
 
 
+## -----------------------------------------------------------------------------
+## SECTION 9: CLI ENTRYPOINT & DISPATCHER
+## -----------------------------------------------------------------------------
 def main(argv=None):
-    """CLI entrypoint for event-driven scans and USB removable device scans."""
+    """CLI entrypoint for event-driven scans and USB removable device scans.
+
+    Parameters:
+        argv (list[str] | None): Argument list override.
+
+    Returns:
+        int: POSIX exit status code.
+    """
     ap = argparse.ArgumentParser(prog="twu_scan_event.py", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    ## Subcommand: scan-new
     a = sub.add_parser("scan-new", help="Process new or modified files triggered by event hooks")
     a.add_argument("paths", nargs="*", help="File paths that triggered the event")
     a.add_argument("--dir", action="append", default=[], help="Directory to expand changed files from")
@@ -533,6 +707,7 @@ def main(argv=None):
     a.add_argument("--root", default=str(REPO), help="Workspace root directory")
     a.add_argument("--no-wait", action="store_true", help="Bypass debounce delay (testing)")
 
+    ## Subcommand: usb
     u = sub.add_parser("usb", help="Inspect and scan attached external USB volumes")
     u.add_argument("volumes", nargs="*", help="Explicit mount paths to scan")
     u.add_argument("--depth", type=int, default=USB_DEPTH, help="Maximum directory depth")

@@ -1,39 +1,95 @@
+## ==============================================================================
+## GitHub Actions Continuous Integration (CI) Workflow: YARA Threat Defense Engine
+## ==============================================================================
+## Author: Ethan REDACTED <ethan@REDACTED>
+## Organization: TWU LLC
+## Copyright: (c) 2026 Ethan REDACTED, TWU LLC
+## License: MIT License 2026
+##
+## Educational Architecture Overview:
+## This workflow automates multi-version test suite matrix runs on Ubuntu Linux,
+## validating the complete offline threat scanning engine, Ahead-of-Time (AOT)
+## AST YARA rule compiler pipeline, and ClamAV antivirus integration.
+##
+## Key Verification Phases:
+## 1. Matrix Execution: Tests across supported Python versions (3.10, 3.11, 3.12, 3.13).
+## 2. System Dependency Provisioning: Installs native `yara`, `clamav`, and `freshclam`.
+## 3. Freshclam Lock Management: Avoids daemon database locks during freshclam sync.
+## 4. Cryptographic Ruleset Integrity: Validates SHA-256 hashes against MANIFEST.json
+##    and compiles index.yar via `yarac`.
+## 5. Comprehensive Unit Testing: Executes all 58 test cases covering verdict synthesis,
+##    sandbox symlink staging, debounce stabilization, and forensic receipt persistence.
+## ==============================================================================
+
 name: CI
 
 on:
+  ## Trigger workflow on every push to main branch
   push:
     branches: [ main ]
+  ## Trigger workflow on pull requests targeting main branch
   pull_request:
     branches: [ main ]
 
 jobs:
   test:
+    name: "Python ${{ matrix.python-version }} Matrix Test"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        ## Test matrix covering all targeted enterprise Python runtimes
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
-      - name: Checkout code
+      ## -----------------------------------------------------------------------
+      ## Step 1: Check out repository workspace source tree
+      ## -----------------------------------------------------------------------
+      - name: Checkout repository code
         uses: actions/checkout@v4
 
+      ## -----------------------------------------------------------------------
+      ## Step 2: Provision target Python runtime environment
+      ## -----------------------------------------------------------------------
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
+      ## -----------------------------------------------------------------------
+      ## Step 3: Install native OS security binaries (YARA & ClamAV)
+      ## Educational Note: The scanning engine requires native binary CLI utilities:
+      ## - `yara` and `yarac`: For pattern matching and ahead-of-time bytecode compilation.
+      ## - `clamscan` and `freshclam`: For virus signature matching and database downloads.
+      ## In GitHub Actions Ubuntu runners, the background service `clamav-freshclam`
+      ## holds a flock() lock on /var/lib/clamav/freshclam.dat. We stop the daemon
+      ## service before invoking `freshclam` to avoid lock contention.
+      ## -----------------------------------------------------------------------
       - name: Install System Dependencies (YARA & ClamAV)
         run: |
           sudo apt-get update
           sudo apt-get install -y yara clamav clamav-freshclam
+          ## Stop background freshclam service to release file lock on /var/lib/clamav
           sudo systemctl stop clamav-freshclam.service || true
+          ## Trigger a quiet signature download pass if network permits
           sudo freshclam --quiet || true
 
+      ## -----------------------------------------------------------------------
+      ## Step 4: Verify YARA ruleset cryptographic integrity & AOT AST compilation
+      ## Runs `twu_yara_vet.py verify` to ensure every vetted rule file matches its
+      ## SHA-256 digest in MANIFEST.json and that `index.yar` compiles cleanly.
+      ## -----------------------------------------------------------------------
       - name: Verify YARA Ruleset Integrity & Ahead-of-Time AST Compilation
         run: |
           python3 scripts/twu_yara_vet.py verify
 
-      - name: Run Test Suite
+      ## -----------------------------------------------------------------------
+      ## Step 5: Execute full unit test suite (58/58 test cases)
+      ## Runs unittest against all test modules:
+      ## - test_twu_scan.py: Dual-engine verdicts, sandbox symlink staging, exit codes
+      ## - test_twu_yara_vet.py: AST allowlist checks, module constraints, tamper detection
+      ## - test_twu_scan_event.py: Event debouncing, GGUF model headers, USB containment
+      ## -----------------------------------------------------------------------
+      - name: Run Complete Test Suite
         run: |
           python3 -m unittest scripts/test_twu_scan.py scripts/test_twu_yara_vet.py scripts/test_twu_scan_event.py

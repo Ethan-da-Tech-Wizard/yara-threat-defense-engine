@@ -1,52 +1,62 @@
 #!/usr/bin/env python3
-"""twu_scan: Dual-Engine Threat Defense Scanner (YARA Heuristics + ClamAV Signatures).
+## ==============================================================================
+## TWU THREAT DEFENSE ENGINE: DUAL-ENGINE MALWARE SCANNER (YARA + CLAMAV)
+## ==============================================================================
+## Author: Ethan REDACTED <ethan@REDACTED>
+## Organization: TWU LLC
+## Copyright: (c) 2026 Ethan REDACTED, TWU LLC
+## License: MIT License 2026
+##
+## EDUCATIONAL ARCHITECTURE: DUAL-ENGINE THREAT DETECTION PATTERN
+## ------------------------------------------------------------------------------
+## Modern threat detection requires complementary scanning paradigms. Relying on
+## a single engine leaves dangerous blind spots:
+##
+## 1. ClamAV (Signature-Based Detection):
+##    - Strengths: Rapid matching of known malware families, exact file hashes,
+##      trojans, worms, and established virus signatures.
+##    - Limitations: Ineffective against novel zero-day payloads, polymorphic scripts,
+##      or living-off-the-land techniques that don't match existing signature databases.
+##    - Classification: A match here indicates confirmed malware -> INFECTED.
+##
+## 2. YARA (Heuristic & Pattern-Based Detection):
+##    - Strengths: Identifying behavioral patterns, webshell syntax, reverse shell strings,
+##      cryptominer artifacts, obfuscated eval routines, and structural anomalies.
+##    - Limitations: Higher risk of false positives on legitimate developer tools,
+##      system utilities, or test fixtures.
+##    - Classification: A match here flags behavioral suspicion -> SUSPICIOUS.
+##
+## 3. Strict Fail-Closed Decision Hierarchy:
+##    - CLEAN: Both engines executed successfully with zero signature or rule matches.
+##    - SUSPICIOUS: YARA matched heuristic patterns.
+##    - INFECTED: ClamAV matched a confirmed virus/malware signature.
+##    - COULD-NOT-SCAN: An engine failed, timed out, was uninstalled, had permission
+##      denied, or a file was oversized / non-regular. Crucially, UNCERTAINTY IS
+##      NEVER REPORTED AS CLEAN.
+##
+## 4. Execution Isolation & Anti-Tamper Design:
+##    - Scanned files are NEVER executed, imported, or dynamically evaluated.
+##    - Target paths are staged as anonymous symlinks (`f0000000`, `f0000001`)
+##      inside a private 0700 temporary directory. This prevents command injection,
+##      filename manipulation, or shell escape attacks against native engine CLIs.
+##    - Cryptographic receipts (SHA-256) are generated atomically for forensic audit.
+##
+## Commands:
+##   scan PATH... [--max-mb N] [--timeout S] [--json]
+##         Execute dual-engine scan. Exit 0 = CLEAN, 1 = SUSPICIOUS/INFECTED, 2 = COULD-NOT-SCAN.
+##   status [--json]
+##         Display health, engine versions, signature database age, and rule counts.
+##   update-signatures [--approve]
+##         Propose or apply ClamAV signature database refresh via freshclam.
+##   update-rules
+##         Display instructions for refreshing vetted YARA rules from pinned commits.
+## ==============================================================================
 
-===============================================================================
-EDUCATIONAL CONCEPT: DUAL-ENGINE MALWARE SCANNING PATTERN
-===============================================================================
-Modern threat detection requires complementary scanning paradigms. Relying on
-a single engine leaves dangerous blind spots:
+"""twu_scan: Dual-Engine Threat Defense Scanner (YARA Heuristics + ClamAV Signatures)."""
 
-1. ClamAV (Signature-Based Detection):
-   - Best at: High-fidelity detection of known malware families, exact file hashes,
-     trojans, worms, and established virus signatures.
-   - Limitation: Ineffective against novel 0-day payloads, polymorphic scripts,
-     or living-off-the-land techniques that don't match existing signature databases.
-   - Classification: A match here indicates confirmed malware -> INFECTED.
-
-2. YARA (Heuristic & Pattern-Based Detection):
-   - Best at: Identifying behavioral patterns, webshell syntax, reverse shell strings,
-     cryptominer artifacts, obfuscated eval routines, and structural anomalies.
-   - Limitation: Higher risk of false positives on legitimate developer tools,
-     system utilities, or test fixtures.
-   - Classification: A match here flags behavioral suspicion -> SUSPICIOUS.
-
-3. Fail-Closed Classification Hierarchy:
-   - CLEAN: Both engines executed successfully with zero signature or rule matches.
-   - SUSPICIOUS: YARA matched heuristic patterns.
-   - INFECTED: ClamAV matched a confirmed virus/malware signature.
-   - COULD-NOT-SCAN: An engine failed, timed out, was uninstalled, had permission
-     denied, or a file was oversized / non-regular. Crucially, UNCERTAINTY IS
-     NEVER REPORTED AS CLEAN.
-
-4. Execution Isolation & Anti-Tamper Design:
-   - Scanned files are NEVER executed, imported, or dynamically evaluated.
-   - Scanned paths are mapped to anonymous symlinks (`f0000001`, `f0000002`)
-     inside a private 0700 temporary directory, preventing command injection
-     or path manipulation against native engine CLIs.
-   - Cryptographic receipts (SHA-256) are generated atomically for forensic audit.
-
-Commands:
-  scan PATH... [--max-mb N] [--timeout S] [--json]
-        Execute dual-engine scan. Exit 0 = CLEAN, 1 = SUSPICIOUS/INFECTED, 2 = COULD-NOT-SCAN.
-  status [--json]
-        Display health, engine versions, signature database age, and rule counts.
-  update-signatures [--approve]
-        Propose or apply ClamAV signature database refresh via freshclam.
-  update-rules
-        Display instructions for refreshing vetted YARA rules from pinned commits.
-"""
-
+## -----------------------------------------------------------------------------
+## SECTION 1: IMPORTS & RUNTIME ENVIRONMENT INITIALIZATION
+## -----------------------------------------------------------------------------
 import argparse
 import hashlib
 import json
@@ -61,52 +71,68 @@ import tempfile
 import time
 from pathlib import Path
 
-# Base directory setup: Anchors to repository root
+## Base directory setup: Anchors to repository root
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 
-# System hostname identification for multi-node audit provenance
+## System hostname identification for multi-node audit provenance
 HOST = platform.node().split(".")[0] or "host"
 
-# -----------------------------------------------------------------------------
-# Threat Classification Hierarchy & Exit Codes
-# -----------------------------------------------------------------------------
-# Severity ranking: Higher numerical value indicates higher threat priority.
-# Used to determine overall aggregate scan verdict.
+## -----------------------------------------------------------------------------
+## SECTION 2: THREAT CLASSIFICATION HIERARCHY & OPERATIONAL THRESHOLDS
+## -----------------------------------------------------------------------------
+## Severity ranking: Higher numerical value indicates higher threat priority.
+## Used in synthesis to compute overall scan verdict across multiple targets.
 VERDICT_RANK = {
-    "CLEAN": 0,           # Safe: Both engines ran, no detections
-    "COULD-NOT-SCAN": 1,  # Inconclusive: Errors, timeouts, or permission limits
-    "SUSPICIOUS": 2,      # Anomaly: YARA heuristic or behavioral pattern match
-    "INFECTED": 3,        # Confirmed Threat: ClamAV virus signature match
+    "CLEAN": 0,           ## Safe: Both engines ran, zero detections
+    "COULD-NOT-SCAN": 1,  ## Inconclusive: Errors, timeouts, or permission limits
+    "SUSPICIOUS": 2,      ## Anomaly: YARA heuristic or behavioral pattern match
+    "INFECTED": 3,        ## Confirmed Threat: ClamAV virus signature match
 }
 
-# Standard UNIX exit codes for CLI automation and CI/CD pipelines
+## Standard POSIX exit status codes for CLI automation and CI/CD pipelines
 EXIT = {
-    "CLEAN": 0,           # Pipeline succeeds
-    "SUSPICIOUS": 1,      # Pipeline fails (security warning)
-    "INFECTED": 1,        # Pipeline fails (confirmed threat)
-    "COULD-NOT-SCAN": 2,  # Pipeline fails (scan failure / misconfiguration)
+    "CLEAN": 0,           ## Pipeline succeeds: All scanned files verified clean
+    "SUSPICIOUS": 1,      ## Pipeline fails: Security warning, heuristic anomaly
+    "INFECTED": 1,        ## Pipeline fails: Critical threat detected
+    "COULD-NOT-SCAN": 2,  ## Pipeline fails: Scan failure, timeout, or misconfiguration
 }
 
-# Operational guardrails and thresholds
-DEFAULT_MAX_BYTES = 200 * 1024 * 1024  # 200 MiB per-file cap to prevent memory exhaustion
-DEFAULT_TIMEOUT = 300                  # 5-minute watchdog timer per scan invocation
-SIG_MAX_AGE_DAYS = 7                   # Max acceptable age for ClamAV signature database
-RULES_MAX_AGE_DAYS = 90                # Max recommended age for vetted YARA rules
+## Operational guardrails and thresholds
+DEFAULT_MAX_BYTES = 200 * 1024 * 1024  ## 200 MiB per-file cap to prevent memory exhaustion
+DEFAULT_TIMEOUT = 300                  ## 5-minute watchdog timer per scan invocation
+SIG_MAX_AGE_DAYS = 7                   ## Max acceptable age for ClamAV signature database
+RULES_MAX_AGE_DAYS = 90                ## Max recommended age for vetted YARA rules
 TOOL_NAMES = ("yara", "clamscan", "freshclam")
 
 
 def exit_code(verdict):
-    """Translate scan verdict string into standard POSIX exit status code."""
+    """Translate scan verdict string into standard POSIX exit status code.
+
+    Parameters:
+        verdict (str): 'CLEAN', 'SUSPICIOUS', 'INFECTED', or 'COULD-NOT-SCAN'.
+
+    Returns:
+        int: 0 for CLEAN, 1 for SUSPICIOUS/INFECTED, 2 for COULD-NOT-SCAN.
+    """
     return EXIT.get(verdict, 3)
 
 
+## -----------------------------------------------------------------------------
+## SECTION 3: EXTERNAL BINARY DISCOVERY & UTILITY FUNCTIONS
+## -----------------------------------------------------------------------------
 def _which(cmd):
     """Locate tool executable with graceful fallback to ~/.local/bin.
 
     Educational Note: In locked-down systems, custom or sandboxed security
     tools often reside in user-isolated directories rather than /usr/bin.
+
+    Parameters:
+        cmd (str): Executable name to discover.
+
+    Returns:
+        str | None: Absolute path to executable if runnable, else None.
     """
     try:
         import twu_toolparity
@@ -120,12 +146,24 @@ def _which(cmd):
 
 
 def find_tools():
-    """Discover paths for required external security binaries."""
+    """Discover paths for required external security binaries.
+
+    Returns:
+        dict[str, str | None]: Map of tool name to discovered binary path.
+    """
     return {n: _which(n) for n in TOOL_NAMES}
 
 
 def default_db_dir():
-    """Locate platform-specific default ClamAV signature database path."""
+    """Locate platform-specific default ClamAV signature database path.
+
+    Educational Note: macOS ClamAV installations (Homebrew) or user-space
+    setups store databases in ~/.local/share/clamav, whereas Linux distribution
+    packages default to system-wide /var/lib/clamav.
+
+    Returns:
+        Path: Target directory where CVD/CLD signature databases reside.
+    """
     user = Path.home() / ".local" / "share" / "clamav"
     if sys.platform == "darwin" or user.is_dir():
         return user
@@ -133,19 +171,43 @@ def default_db_dir():
 
 
 def _run(argv, timeout, cwd=None):
-    """Execute external subprocess with strict timeout and output capture."""
+    """Execute external subprocess with strict timeout and output capture.
+
+    Parameters:
+        argv (list[str]): Command-line arguments.
+        timeout (int): Timeout in seconds before subprocess aborts.
+        cwd (str | None): Working directory for the process.
+
+    Returns:
+        tuple[int, str, str]: (returncode, stdout_text, stderr_text)
+    """
     r = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=timeout, cwd=cwd)
     return r.returncode, (r.stdout or ""), (r.stderr or "")
 
 
 def _default_runner(argv, timeout):
-    """Standard execution runner returning combined output."""
+    """Standard execution runner returning combined output.
+
+    Parameters:
+        argv (list[str]): Command arguments.
+        timeout (int): Execution timeout.
+
+    Returns:
+        tuple[int, str]: (returncode, combined_stdout_and_stderr)
+    """
     rc, out, err = _run(argv, timeout)
     return rc, out + err
 
 
 def sha256(path):
-    """Calculate streaming cryptographic SHA-256 checksum."""
+    """Calculate streaming cryptographic SHA-256 checksum.
+
+    Parameters:
+        path (Path | str): File path to hash.
+
+    Returns:
+        str: 64-character hexadecimal SHA-256 digest.
+    """
     h = hashlib.sha256()
     with open(str(path), "rb") as f:
         for b in iter(lambda: f.read(1 << 20), b""):
@@ -153,18 +215,25 @@ def sha256(path):
     return h.hexdigest()
 
 
+## -----------------------------------------------------------------------------
+## SECTION 4: ATOMIC RECEIPTS & WRITE-ONCE FORENSIC PRESERVATION
+## -----------------------------------------------------------------------------
 def write_atomic(path, doc, unique=False):
     """Write JSON document atomically to prevent race conditions or corrupt reads.
 
     Parameters:
-        path: Target file path
-        doc: JSON-serializable dictionary
-        unique: If True, uses link() to guarantee an existing receipt is never overwritten
+        path (Path | str): Target file path.
+        doc (dict): JSON-serializable dictionary.
+        unique (bool): If True, uses link() to guarantee an existing receipt is never overwritten.
 
-    Educational Pattern: Atomic Renaming & Hard-Link Append.
+    Returns:
+        Path: Actual path where the file was written.
+
+    Educational Pattern: Atomic Renaming & Hard-Link Write-Once Audit.
     Writing to a sibling temporary file and using os.replace() guarantees that
     readers never see partially written files. When unique=True, using os.link()
-    ensures write-once immutability for forensic records.
+    ensures write-once immutability for forensic records: if the target filename
+    already exists, an incrementing index is appended until an unused slot is found.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,7 +249,7 @@ def write_atomic(path, doc, unique=False):
         while True:
             final = path if n == 0 else path.with_name("%s-%d%s" % (path.stem, n, path.suffix))
             try:
-                os.link(tmp, str(final))  # Fails atomically if file exists
+                os.link(tmp, str(final))  ## Fails atomically if file exists
                 return final
             except FileExistsError:
                 n += 1
@@ -191,11 +260,19 @@ def write_atomic(path, doc, unique=False):
             pass
 
 
-# -----------------------------------------------------------------------------
-# Status & Diagnostic Health Checks
-# -----------------------------------------------------------------------------
+## -----------------------------------------------------------------------------
+## SECTION 5: ENGINE HEALTH & STATUS INSPECTION
+## -----------------------------------------------------------------------------
 def tool_version(path, timeout=15):
-    """Extract semantic version string from tool binary via `--version` flag."""
+    """Extract semantic version string from tool binary via `--version` flag.
+
+    Parameters:
+        path (str | None): Tool binary path.
+        timeout (int): Timeout in seconds.
+
+    Returns:
+        str | None: Extracted version number or None.
+    """
     if not path:
         return None
     try:
@@ -208,12 +285,21 @@ def tool_version(path, timeout=15):
 
 
 def signature_info(db_dir, now=None):
-    """Inspect ClamAV signature database age and freshness."""
+    """Inspect ClamAV signature database age and freshness.
+
+    Parameters:
+        db_dir (Path | str | None): Path to ClamAV signature database directory.
+        now (float | None): Current epoch timestamp for age calculation.
+
+    Returns:
+        dict: {dir, present, age_days, fresh}
+    """
     now = now if now is not None else time.time()
     db = Path(db_dir) if db_dir else None
     newest = None
     if db and db.is_dir():
         for f in db.iterdir():
+            ## ClamAV database files have extensions .cvd (official), .cld (local), .cud (uncompressed)
             if f.suffix in (".cvd", ".cld", ".cud") and f.is_file():
                 newest = max(newest or 0, f.stat().st_mtime)
     if newest is None:
@@ -223,7 +309,16 @@ def signature_info(db_dir, now=None):
 
 
 def rules_info(rules_dir, now=None, check_files=True):
-    """Inspect YARA ruleset metadata, compiler readiness, and SHA-256 integrity."""
+    """Inspect YARA ruleset metadata, compiler readiness, and SHA-256 integrity.
+
+    Parameters:
+        rules_dir (Path | str): Path to directory holding vetted YARA rules.
+        now (float | None): Current epoch timestamp override.
+        check_files (bool): Whether to invoke `twu_yara_vet.verify()` hash check.
+
+    Returns:
+        dict: Metadata dictionary including rule_count, age_days, problems, and ok flag.
+    """
     now = now if now is not None else time.time()
     rd = Path(rules_dir)
     info = {"dir": str(rd), "rule_count": 0, "files": 0, "built": None, "age_days": None, "problems": [], "ok": False}
@@ -249,8 +344,18 @@ def rules_info(rules_dir, now=None, check_files=True):
     return info
 
 
+## -----------------------------------------------------------------------------
+## SECTION 6: EXCLUSIONS & PINNED TEST FIXTURES
+## -----------------------------------------------------------------------------
 def load_exclusions(rules_dir):
-    """Load list of false-positive rule names explicitly suppressed in EXCLUSIONS.json."""
+    """Load list of false-positive rule names explicitly suppressed in EXCLUSIONS.json.
+
+    Parameters:
+        rules_dir (Path | str): Directory containing EXCLUSIONS.json.
+
+    Returns:
+        set[str]: Set of rule identifiers to suppress during scanning.
+    """
     try:
         d = json.loads((Path(rules_dir) / "EXCLUSIONS.json").read_text(encoding="utf-8"))
         return set(e["rule"] for e in d.get("excluded", []))
@@ -259,7 +364,14 @@ def load_exclusions(rules_dir):
 
 
 def load_fixtures(rules_dir):
-    """Load map of {repo-relative path: sha256} for intentional test attack fixtures."""
+    """Load map of {repo-relative path: sha256} for intentional test attack fixtures.
+
+    Parameters:
+        rules_dir (Path | str): Directory containing EXCLUSIONS.json.
+
+    Returns:
+        dict[str, str]: Mapping of repository-relative path to lowercase SHA-256 digest.
+    """
     try:
         d = json.loads((Path(rules_dir) / "EXCLUSIONS.json").read_text(encoding="utf-8"))
         out = {}
@@ -280,6 +392,15 @@ def _pinned_fixture(path, sha, root, fixtures):
     preventing real malware from bypassing detection, fixtures are pinned BOTH by
     relative path AND exact cryptographic SHA-256 digest. If an attacker modifies
     a fixture file, its SHA-256 changes and the exemption is revoked.
+
+    Parameters:
+        path (str): Real filesystem path of candidate file.
+        sha (str | None): Computed SHA-256 hash of candidate file.
+        root (Path | str): Workspace root.
+        fixtures (dict[str, str]): Pinned fixtures map {path: sha256}.
+
+    Returns:
+        bool: True only if path is inside repository and matches pinned SHA-256.
     """
     try:
         rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
@@ -291,7 +412,18 @@ def _pinned_fixture(path, sha, root, fixtures):
 
 
 def status(root=REPO, tools=None, db_dir=None, rules_dir=None, now=None):
-    """Compile comprehensive system health and engine readiness report."""
+    """Compile comprehensive system health and engine readiness report.
+
+    Parameters:
+        root (Path | str): Repository root directory.
+        tools (dict | None): Tool binary dictionary.
+        db_dir (Path | str | None): ClamAV database directory.
+        rules_dir (Path | str | None): Vetted YARA rules directory.
+        now (float | None): Epoch timestamp override.
+
+    Returns:
+        dict: Complete scanner readiness diagnostic structure.
+    """
     root = Path(root)
     tools = tools if tools is not None else find_tools()
     rules_dir = Path(rules_dir) if rules_dir else root / "data" / "yara_rules"
@@ -320,11 +452,20 @@ def status(root=REPO, tools=None, db_dir=None, rules_dir=None, now=None):
     }
 
 
-# -----------------------------------------------------------------------------
-# Signature & Rule Update Proposals
-# -----------------------------------------------------------------------------
+## -----------------------------------------------------------------------------
+## SECTION 7: SIGNATURE & RULE UPDATE PROPOSALS
+## -----------------------------------------------------------------------------
 def _decide(action, root, decider=None):
-    """Policy decision hook: determines if an update should be automated or proposed."""
+    """Policy decision hook: determines if an update should be automated or proposed.
+
+    Parameters:
+        action (str): Identifier of the maintenance action.
+        root (Path | str): Repository root.
+        decider (callable | None): Policy decider override.
+
+    Returns:
+        str: Policy outcome ('PROPOSE', 'NEVER', 'ALLOW').
+    """
     try:
         if decider:
             return decider(action)
@@ -335,7 +476,16 @@ def _decide(action, root, decider=None):
 
 
 def update_items(st, root, decider=None):
-    """Audit engine status and construct actionable maintenance proposals."""
+    """Audit engine status and construct actionable maintenance proposals.
+
+    Parameters:
+        st (dict): System status structure from status().
+        root (Path | str): Repository root.
+        decider (callable | None): Policy decider hook.
+
+    Returns:
+        list[dict]: List of update proposals.
+    """
     items = []
     sig, rules = st["signatures"], st["rules"]
     if st["tools"]["clamscan"]["path"] and (not sig["present"] or not sig["fresh"]):
@@ -361,7 +511,13 @@ def update_items(st, root, decider=None):
 
 
 def write_updates(root, items, now=None):
-    """Persist structured update proposals to health directory."""
+    """Persist structured update proposals to health directory.
+
+    Parameters:
+        root (Path | str): Workspace root.
+        items (list[dict]): Update proposal items.
+        now (float | None): Current epoch timestamp.
+    """
     doc = {
         "host": HOST,
         "ts": now if now is not None else time.time(),
@@ -375,7 +531,19 @@ def write_updates(root, items, now=None):
 
 
 def update_signatures(root=REPO, approve=False, tools=None, decider=None, runner=None, timeout=900):
-    """Execute freshclam update when explicitly authorized by operator."""
+    """Execute freshclam update when explicitly authorized by operator.
+
+    Parameters:
+        root (Path | str): Repository root.
+        approve (bool): Operator confirmation flag.
+        tools (dict | None): Tool binaries map.
+        decider (callable | None): Policy decision hook.
+        runner (callable | None): Subprocess execution runner hook.
+        timeout (int): Download timeout in seconds.
+
+    Returns:
+        dict: Status result dictionary.
+    """
     tools = tools if tools is not None else find_tools()
     cmd = "python3 scripts/twu_scan.py update-signatures --approve"
     cls = _decide("update_clamav_signatures", root, decider)
@@ -397,9 +565,9 @@ def update_signatures(root=REPO, approve=False, tools=None, decider=None, runner
     return {"status": "failed", "detail": ((out or "").strip()[-300:] + hint)}
 
 
-# -----------------------------------------------------------------------------
-# Core Scanning Implementation
-# -----------------------------------------------------------------------------
+## -----------------------------------------------------------------------------
+## SECTION 8: TARGET FILE COLLECTION & FILTERING
+## -----------------------------------------------------------------------------
 def _collect(paths, max_bytes):
     """Filter, stat, and collect candidate regular files for scanning.
 
@@ -410,6 +578,13 @@ def _collect(paths, max_bytes):
     2. File Type Constraints: Sockets, FIFOs, device nodes, and pipes are skipped.
     3. Memory / DoS Guardrails: Files exceeding `max_bytes` are rejected with
        a skip message, preventing scanners from running out of memory on large files.
+
+    Parameters:
+        paths (list[str]): List of files or directories to inspect.
+        max_bytes (int): Upper bound on file size.
+
+    Returns:
+        list[dict]: Collected file candidate records.
     """
     entries = []
 
@@ -450,7 +625,15 @@ ALIAS_RE = re.compile(r"\bf\d{7}\b")
 
 
 def _file_errors(text, engine):
-    """Parse engine error logs to map failure diagnostics back to specific file aliases."""
+    """Parse engine error logs to map failure diagnostics back to specific file aliases.
+
+    Parameters:
+        text (str): Subprocess stdout/stderr log output.
+        engine (str): Name of reporting engine ('ClamAV' or 'YARA').
+
+    Returns:
+        dict[str, str]: Map of alias identifier to human-readable error description.
+    """
     out = {}
     for line in text.splitlines():
         if not re.search(r"error|denied|can't|cannot|could not|unable|no such", line, re.I):
@@ -464,11 +647,23 @@ def _file_errors(text, engine):
     return out
 
 
+## -----------------------------------------------------------------------------
+## SECTION 9: ENGINE DISPATCHERS (CLAMAV & YARA)
+## -----------------------------------------------------------------------------
 def _engine_clam(clam, aliases, lst, timeout):
     """Invoke ClamAV engine on staged file list.
 
+    Parameters:
+        clam (str): Path to clamscan executable.
+        aliases (dict): Map of alias string to file candidate structure.
+        lst (str): Path to staged text file containing list of target paths.
+        timeout (int): Execution timeout in seconds.
+
     Returns:
-        tuple: (findings{alias: [sig_names]}, engine_error_or_None, file_errors{alias: msg})
+        tuple[dict, str | None, dict]: (findings, engine_error, file_errors)
+        - findings: {alias: [signature_name, ...]}
+        - engine_error: Global error message if engine failed or timed out
+        - file_errors: {alias: error_message} for per-file read failures
     """
     argv = [clam, "--no-summary", "--follow-file-symlinks=2", "-f", lst]
     try:
@@ -485,7 +680,7 @@ def _engine_clam(clam, aliases, lst, timeout):
             found.setdefault(os.path.basename(path), []).append(sig)
 
     ferr = _file_errors(out + "\n" + err, "ClamAV")
-    # ClamAV returns 0 for clean, 1 for virus found. Any other exit code is an engine error.
+    ## ClamAV returns 0 for clean, 1 for virus found. Any other exit code is an engine error.
     if rc not in (0, 1) and not ferr:
         return found, "ClamAV error (exit %d): %s" % (
             rc, ((err or out).strip().splitlines() or ["no detail"])[-1][:160]
@@ -496,8 +691,18 @@ def _engine_clam(clam, aliases, lst, timeout):
 def _engine_yara(yara, index, scandir, excl, timeout):
     """Invoke YARA engine against anonymous symlink directory.
 
+    Parameters:
+        yara (str): Path to yara executable.
+        index (Path): Path to vetted index.yar.
+        scandir (str): Path to directory holding anonymous symlinks.
+        excl (set[str]): Excluded rule identifiers to ignore.
+        timeout (int): Execution timeout in seconds.
+
     Returns:
-        tuple: (findings{alias: [rule_names]}, engine_error_or_None, file_errors{alias: msg})
+        tuple[dict, str | None, dict]: (findings, engine_error, file_errors)
+        - findings: {alias: [rule_name, ...]}
+        - engine_error: Global error message if engine failed or timed out
+        - file_errors: {alias: error_message}
     """
     argv = [yara, "-r", str(index), scandir]
     try:
@@ -514,7 +719,7 @@ def _engine_yara(yara, index, scandir, excl, timeout):
             found.setdefault(os.path.basename(path), []).append(rule)
 
     ferr = _file_errors(err, "YARA")
-    # YARA returns 0 on clean/success. Any non-zero exit without specific file error is an engine fault.
+    ## YARA returns 0 on clean/success. Any non-zero exit without specific file error is an engine fault.
     if rc != 0 and not ferr:
         return found, "YARA error (exit %d): %s" % (
             rc, ((err or out).strip().splitlines() or ["no detail"])[-1][:160]
@@ -522,6 +727,9 @@ def _engine_yara(yara, index, scandir, excl, timeout):
     return found, None, ferr
 
 
+## -----------------------------------------------------------------------------
+## SECTION 10: DUAL-ENGINE SCAN ORCHESTRATION & VERDICT SYNTHESIS
+## -----------------------------------------------------------------------------
 def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DEFAULT_MAX_BYTES,
          timeout=DEFAULT_TIMEOUT, write_receipt=True, decider=None, now=None, engines=("yara", "clamav")):
     """Execute complete dual-engine scanning cycle across provided file paths.
@@ -542,11 +750,13 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
     Educational Flow:
     1. Pre-Flight Validation: Verify tool presence, signature age, and rule health.
     2. Candidate Collection: Walk paths, enforce file caps, reject symlinks.
-    3. Anonymous Symlink Staging: Create temporary directory (mode 0700) with
+    3. Anonymous Symlink Staging Sandbox: Create temporary directory (mode 0700) with
        numbered symlinks (`f0000000`, `f0000001`). This completely decouples
-       engine command parsing from arbitrary user filenames.
+       engine command parsing from arbitrary user filenames, neutralizing command
+       injection and path manipulation attacks.
     4. Parallel Engine Execution: Execute ClamAV and YARA against staged targets.
-    5. Pinned Test Fixture Handling: Suppress YARA-only hits on verified fixtures.
+    5. Pinned Test Fixture Handling: Suppress YARA-only hits on verified fixtures
+       that match both repository path AND cryptographic SHA-256 digest.
     6. Fail-Closed Verdict Synthesis:
        - ClamAV detection -> INFECTED
        - YARA detection -> SUSPICIOUS
@@ -562,7 +772,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
     st = status(root, tools, db_dir, rules_dir, now)
     notes, reasons = [], []
 
-    # Step 1: Collect and validate target files
+    ## Step 1: Collect and validate candidate target files
     entries = _collect(list(paths), max_bytes)
     if not entries:
         reasons.append("nothing to scan: no paths given or nothing found")
@@ -574,7 +784,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
 
     engine_err = {}
     if scannable:
-        # Step 2: Anonymous staging sandbox
+        ## Step 2: Anonymous staging sandbox with mode 0700 permissions
         with tempfile.TemporaryDirectory(prefix="twuscan.") as td:
             os.chmod(td, 0o700)
             scandir = os.path.join(td, "files")
@@ -590,7 +800,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
             with open(lst, "w") as f:
                 f.write("".join(os.path.join(scandir, a) + "\n" for a in alias))
 
-            # Step 3a: ClamAV Execution
+            ## Step 3a: ClamAV Execution (Virus Signatures)
             if "clamav" not in engines:
                 pass
             elif not tools.get("clamscan"):
@@ -607,7 +817,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
                         for s in sigs:
                             alias[a]["findings"].append({"engine": "clamav", "name": s})
 
-            # Step 3b: YARA Execution
+            ## Step 3b: YARA Execution (Behavioral Heuristics)
             if "yara" not in engines:
                 pass
             elif not tools.get("yara"):
@@ -628,7 +838,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
                         for r in rl:
                             alias[a]["findings"].append({"engine": "yara", "name": r})
 
-        # Step 4: Record cryptographic file hashes
+        ## Step 4: Record cryptographic file hashes
         for e in scannable:
             try:
                 e["sha256"] = sha256(e["path"])
@@ -638,7 +848,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
             for eng, msg in engine_err.items():
                 e["errors"].append(msg)
 
-    # Step 5: Test fixture exemptions (YARA-only; ClamAV is NEVER ignored)
+    ## Step 5: Test fixture exemptions (YARA-only; ClamAV is NEVER ignored)
     fixtures = load_fixtures(rules_dir)
     for e in scannable if fixtures else []:
         if e["findings"] and all(f["engine"] == "yara" for f in e["findings"]) \
@@ -649,7 +859,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
     for msg in sorted(set(engine_err.values())):
         reasons.append(msg)
 
-    # Step 6: Verdict synthesis
+    ## Step 6: Fail-closed verdict synthesis
     files, worst = [], "CLEAN" if entries else "COULD-NOT-SCAN"
     for e in entries:
         if any(f["engine"] == "clamav" for f in e["findings"]):
@@ -692,21 +902,21 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
             **({"fixture_pinned": e["fixture_pinned"]} if e.get("fixture_pinned") else {}),
         })
 
-    # Fail-closed enforcement: if any engine failed, result can never be clean
+    ## Fail-closed enforcement: if any engine failed, result can never be clean
     if worst == "CLEAN" and engine_err:
         worst = "COULD-NOT-SCAN"
 
     if not reasons and worst == "CLEAN":
         reasons.append("both engines ran; no signature or rule matched (this is not proof of safety)")
 
-    # Step 7: Update proposals and notifications
+    ## Step 7: Update proposals and notifications
     items = update_items(st, root, decider)
     for it in items:
         notes.append("Note: %s. Update available, needs approval: %s" % (it["why"], it["approve"]))
     if write_receipt:
         write_updates(root, items, now)
 
-    # Step 8: Build forensic receipt document
+    ## Step 8: Build forensic receipt document
     doc = {
         "schema": "twu.scan.v1",
         "ts": now,
@@ -733,7 +943,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
         },
     }
 
-    # Step 9: Atomically persist receipt
+    ## Step 9: Atomically persist receipt
     if write_receipt:
         h = hashlib.sha256("\n".join(sorted(e["path"] for e in entries)).encode("utf-8", "replace")).hexdigest()[:8]
         name = "%s-%s.json" % (time.strftime("%Y%m%dT%H%M%S", time.gmtime(now)), h)
@@ -745,11 +955,18 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
     return doc
 
 
-# -----------------------------------------------------------------------------
-# CLI & Terminal Rendering
-# -----------------------------------------------------------------------------
+## -----------------------------------------------------------------------------
+## SECTION 11: CLI & TERMINAL RENDERING
+## -----------------------------------------------------------------------------
 def render_scan(doc):
-    """Format structured scan result dictionary into human-readable terminal output."""
+    """Format structured scan result dictionary into human-readable terminal output.
+
+    Parameters:
+        doc (dict): Scan output document.
+
+    Returns:
+        str: Multi-line formatted terminal string.
+    """
     lines = ["VERDICT: %s" % doc["verdict"]]
     for f in doc["files"]:
         lines.append("%s: %s" % (f["verdict"], f["path"]))
@@ -769,7 +986,14 @@ def render_scan(doc):
 
 
 def render_status(s):
-    """Format system diagnostic status dictionary into human-readable dashboard."""
+    """Format system diagnostic status dictionary into human-readable dashboard.
+
+    Parameters:
+        s (dict): Status output dictionary.
+
+    Returns:
+        str: Multi-line status dashboard text.
+    """
     L = ["Security scanner status (%s): %s" % (s["host"], "ACTIVE" if s["active"] else "NOT ACTIVE")]
     for n in TOOL_NAMES:
         t = s["tools"][n]
@@ -792,22 +1016,33 @@ def render_status(s):
 
 
 def main(argv=None):
-    """Main CLI entrypoint for manual and scripted execution."""
+    """Main CLI entrypoint for manual and scripted execution.
+
+    Parameters:
+        argv (list[str] | None): Argument list override.
+
+    Returns:
+        int: POSIX exit status code.
+    """
     ap = argparse.ArgumentParser(description="Cross-platform malware scan (YARA + ClamAV)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    ## Subcommand: scan
     sc = sub.add_parser("scan", help="Scan specified files or directories")
     sc.add_argument("paths", nargs="+", help="Files or directories to scan")
     sc.add_argument("--max-mb", type=int, default=DEFAULT_MAX_BYTES // (1 << 20), help="Maximum file size in MiB")
     sc.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Scan timeout in seconds")
     sc.add_argument("--json", action="store_true", help="Output raw JSON document")
 
+    ## Subcommand: status
     st = sub.add_parser("status", help="Show scanner health and signature status")
     st.add_argument("--json", action="store_true", help="Output status as JSON")
 
+    ## Subcommand: update-signatures
     us = sub.add_parser("update-signatures", help="Refresh ClamAV signature database")
     us.add_argument("--approve", action="store_true", help="Execute download from official mirror")
 
+    ## Subcommand: update-rules
     sub.add_parser("update-rules", help="Display instructions to refresh vetted YARA rules")
 
     a = ap.parse_args(argv)
@@ -831,7 +1066,7 @@ def main(argv=None):
         print("%s: %s" % (out["status"], out["detail"]))
         return 0 if out["status"] in ("proposal", "updated") else 1
 
-    # update-rules instructions
+    ## update-rules instructions
     print((REPO / "data" / "yara_rules" / "README.md").read_text(encoding="utf-8").split("## Refresh")[-1].strip()
           if (REPO / "data" / "yara_rules" / "README.md").is_file() else "See data/yara_rules/README.md")
     return 0

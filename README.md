@@ -271,6 +271,11 @@ OK
 
 ---
 
-## License
+## License & Authorship
 
-This project is licensed under the [MIT License](LICENSE). Curated third-party YARA rules in `data/yara_rules/vendor/` remain subject to their respective upstream licenses (MIT and Detection Rule License 1.1), as documented in `data/yara_rules/README.md`.
+- **Author**: Ethan REDACTED <ethan@REDACTED>
+- **Organization**: TWU LLC
+- **Copyright**: © 2026 Ethan REDACTED, TWU LLC
+- **License**: [MIT License](LICENSE)
+
+Curated third-party YARA rules in `data/yara_rules/vendor/` remain subject to their respective upstream licenses (MIT and Detection Rule License 1.1), as documented in `data/yara_rules/README.md`.
