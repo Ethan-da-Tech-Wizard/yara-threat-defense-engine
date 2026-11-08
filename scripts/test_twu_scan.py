@@ -302,6 +302,8 @@ class RealRules(unittest.TestCase):
         self.tools = ts.find_tools()
         if not self.tools.get("yara") or not self.tools.get("clamscan"):
             self.skipTest("yara or clamscan not installed")
+        if not ts.signature_info(ts.default_db_dir())["present"]:
+            self.skipTest("ClamAV signatures not installed / present on this host")
         self.td = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.td, True)
 
