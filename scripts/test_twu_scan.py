@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -306,7 +307,7 @@ class RealRules(unittest.TestCase):
             self.skipTest("ClamAV signatures not installed / present on this host")
         # Verify ClamAV database is valid and readable without errors
         db_dir = ts.default_db_dir()
-        chk = subprocess.run([self.tools["clamscan"], "--database=" + db_dir, "/dev/null"], capture_output=True)
+        chk = subprocess.run([self.tools["clamscan"], "--database=" + str(db_dir), "/dev/null"], capture_output=True)
         if chk.returncode not in (0, 1):
             self.skipTest("ClamAV database not fully initialized (%s)" % chk.stderr.decode().strip()[:80])
         self.td = tempfile.mkdtemp()
