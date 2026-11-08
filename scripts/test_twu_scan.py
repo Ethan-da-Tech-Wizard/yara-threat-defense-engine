@@ -304,6 +304,11 @@ class RealRules(unittest.TestCase):
             self.skipTest("yara or clamscan not installed")
         if not ts.signature_info(ts.default_db_dir())["present"]:
             self.skipTest("ClamAV signatures not installed / present on this host")
+        # Verify ClamAV database is valid and readable without errors
+        db_dir = ts.default_db_dir()
+        chk = subprocess.run([self.tools["clamscan"], "--database=" + db_dir, "/dev/null"], capture_output=True)
+        if chk.returncode not in (0, 1):
+            self.skipTest("ClamAV database not fully initialized (%s)" % chk.stderr.decode().strip()[:80])
         self.td = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.td, True)
 

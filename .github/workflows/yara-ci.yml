@@ -27,7 +27,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y yara clamav clamav-freshclam
-          sudo freshclam || true
+          sudo systemctl stop clamav-freshclam.service || true
+          sudo freshclam --quiet || true
 
       - name: Verify YARA Ruleset Integrity & Ahead-of-Time AST Compilation
         run: |
