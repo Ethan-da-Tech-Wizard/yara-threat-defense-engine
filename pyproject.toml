@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "yara-threat-defense-engine"
 version = "1.0.0"
-description = "Production offline malware scanning and threat defense engine combining curated YARA rule compilation and ClamAV integration."
+description = "Project exploring malware scanning with YARA and ClamAV."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -26,7 +26,6 @@ keywords = [
     "devsecops",
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: System Administrators",
     "Intended Audience :: Information Technology",
     "Intended Audience :: Developers",
