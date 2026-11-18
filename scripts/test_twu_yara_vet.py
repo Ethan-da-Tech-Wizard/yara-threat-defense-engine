@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ==============================================================================
+# Program: test_twu_yara_vet.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Automated regression test suite for YARA signature vetting and AOT
+#          compilation. Verifies AST static inspection, rejection of prohibited modules
+#          and global rules, cryptographic SHA-256 tamper detection, exclusion catalog
+#          enforcement, and vendor rule provenance tracking.
+# ==============================================================================
 ## ==============================================================================
 ## UNIT TESTS: YARA RULE VETTING & AOT COMPILATION ENGINE
 ## ==============================================================================

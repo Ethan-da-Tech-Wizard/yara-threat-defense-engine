@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# ==============================================================================
+# Program: twu_yara_vet.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Ahead-of-Time (AOT) static analysis, vetting, and compilation pipeline
+#          for YARA malware detection signatures. Validates syntactic correctness,
+#          restricts dangerous external modules (e.g. cuckoo), bans global rule side-effects
+#          and recursive includes, enforces exclusions, and generates cryptographic
+#          SHA-256 manifests to establish an immutable, verifiable rule baseline.
+# ==============================================================================
 ## ==============================================================================
 ## TWU THREAT DEFENSE ENGINE: YARA RULE VETTING & AOT COMPILATION
 ## ==============================================================================

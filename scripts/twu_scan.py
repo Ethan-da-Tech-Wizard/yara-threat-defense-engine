@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# ==============================================================================
+# Program: twu_scan.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Dual-engine threat defense scanner orchestrating YARA heuristic rules
+#          and ClamAV signature-based antimalware detection. Features anonymous symlink
+#          staging for safe path evaluation, defense-in-depth script non-execution,
+#          hierarchical verdict synthesis (CLEAN, SUSPICIOUS, INFECTED, COULD-NOT-SCAN),
+#          and atomic write-once forensic JSON audit receipts.
+# ==============================================================================
 ## ==============================================================================
 ## TWU THREAT DEFENSE ENGINE: DUAL-ENGINE MALWARE SCANNER (YARA + CLAMAV)
 ## ==============================================================================

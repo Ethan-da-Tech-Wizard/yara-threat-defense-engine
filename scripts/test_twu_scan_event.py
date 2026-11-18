@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ==============================================================================
+# Program: test_twu_scan_event.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Automated unit test harness for the event-driven file scanner and alert stager.
+#          Tests self-trigger suppression, active write stabilization debouncing,
+#          path normalization and deduplication cache limits, bounded USB traversal,
+#          and streaming GGUF tensor format validation.
+# ==============================================================================
 ## ==============================================================================
 ## UNIT TESTS: EVENT-DRIVEN FILE SCANNER & FORENSIC ALERT STAGING
 ## ==============================================================================

@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ==============================================================================
+# Program: test_twu_scan.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Comprehensive unit test suite for the dual-engine threat defense scanner.
+#          Evaluates verdict synthesis, priority hierarchy (ClamAV outranking YARA),
+#          fail-closed timeout and oversize guards, anonymous symlink staging,
+#          receipt immutability, signature update gating, and live engine integration.
+# ==============================================================================
 ## ==============================================================================
 ## UNIT TESTS: DUAL-ENGINE THREAT DEFENSE SCANNER (YARA + CLAMAV)
 ## ==============================================================================

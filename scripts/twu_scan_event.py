@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ==============================================================================
+# Program: twu_scan_event.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Event-driven threat detection scanner and forensic alert staging engine.
+#          Provides zero-daemon event processing, single-sleep write stabilization debouncing,
+#          in-memory state deduplication, memory-safe GGUF tensor file header parsing,
+#          and bounded USB removable media inspection without background daemon overhead.
+# ==============================================================================
 ## ==============================================================================
 ## TWU THREAT DEFENSE ENGINE: EVENT-DRIVEN SCANNER & ALERT STAGING
 ## ==============================================================================
