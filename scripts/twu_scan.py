@@ -2,7 +2,6 @@
 # ==============================================================================
 # Program: twu_scan.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Dual-engine threat defense scanner orchestrating YARA heuristic rules
 #          and ClamAV signature-based antimalware detection. Features anonymous symlink

@@ -2,7 +2,6 @@
 # ==============================================================================
 # Program: test_twu_scan.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Comprehensive unit test suite for the dual-engine threat defense scanner.
 #          Evaluates verdict synthesis, priority hierarchy (ClamAV outranking YARA),
