@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+## Program: yara-threat-defense-engine - twu_yara_vet.py
+## Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+## Last Modified: 2026-11-18
+## Purpose: This file vets YARA rule files (rejects dangerous imports, global rules and includes), checks them against a SHA-256 manifest, and compiles the approved rule index.
 ## ==============================================================================
 ## TWU THREAT DEFENSE ENGINE: YARA RULE VETTING & AOT COMPILATION
 ## ==============================================================================

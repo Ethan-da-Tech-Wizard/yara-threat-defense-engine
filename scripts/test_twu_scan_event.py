@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+## Program: yara-threat-defense-engine - test_twu_scan_event.py
+## Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+## Last Modified: 2026-11-18
+## Purpose: This file unit tests for twu_scan_event.py covering path filtering, debounce, dedupe, alert staging, GGUF header reads and USB scan depth.
 ## ==============================================================================
 ## UNIT TESTS: EVENT-DRIVEN FILE SCANNER & FORENSIC ALERT STAGING
 ## ==============================================================================
@@ -28,6 +32,8 @@
 ##    automatic detection of Windows autorun.inf threat vectors.
 ## ==============================================================================
 
+"""Unit tests for twu_scan_event.py (filtering, debounce, alerts, GGUF headers, USB)."""
+
 import contextlib
 import io
 import json
@@ -52,6 +58,7 @@ def fake_scan(verdicts):
         callable: Mock scanner function compatible with `twu_scan.scan()` signature.
     """
     def f(paths, **kw):
+        """Return a canned scan result for the given paths."""
         files = [
             {
                 "path": p,

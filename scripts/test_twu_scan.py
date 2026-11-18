@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+## Program: yara-threat-defense-engine - test_twu_scan.py
+## Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+## Last Modified: 2026-11-18
+## Purpose: This file unit tests for twu_scan.py covering verdict rules, fail-closed errors, symlink staging, pinned fixtures and write-once receipts.
 ## ==============================================================================
 ## UNIT TESTS: DUAL-ENGINE THREAT DEFENSE SCANNER (YARA + CLAMAV)
 ## ==============================================================================
@@ -27,6 +31,8 @@
 ## 5. Write-Once Audit Receipts: Verifies that forensic JSON receipts are atomically
 ##    persisted using hard-link uniqueness (`link()`).
 ## ==============================================================================
+
+"""Unit tests for twu_scan.py (verdicts, fail-closed errors, staging, receipts)."""
 
 import json
 import os
@@ -359,6 +365,7 @@ class PinnedFixtures(Base):
     """
 
     def setUp(self):
+        """Swap in a fake clamscan that never reports EICAR, then create a fixture file."""
         super().setUp()
         self.tools["clamscan"] = mk_tool(self.bin, "clam2", FAKE_CLAM.replace('b"EICAR" in d', 'False'))
         (self.root / "scripts").mkdir()

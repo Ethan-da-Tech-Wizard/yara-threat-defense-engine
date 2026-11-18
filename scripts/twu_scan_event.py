@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+## Program: yara-threat-defense-engine - twu_scan_event.py
+## Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+## Last Modified: 2026-11-18
+## Purpose: This file watches for file events (and removable media), debounces and scans changed files through twu_scan, and stages non-destructive alert records for flagged files.
 ## ==============================================================================
 ## TWU THREAT DEFENSE ENGINE: EVENT-DRIVEN SCANNER & ALERT STAGING
 ## ==============================================================================

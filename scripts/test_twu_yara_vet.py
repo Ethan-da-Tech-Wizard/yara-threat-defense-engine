@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+## Program: yara-threat-defense-engine - test_twu_yara_vet.py
+## Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+## Last Modified: 2026-11-18
+## Purpose: This file unit tests for twu_yara_vet.py covering rule linting, tamper detection by hash, exclusion schema and manifest provenance.
 ## ==============================================================================
 ## UNIT TESTS: YARA RULE VETTING & AOT COMPILATION ENGINE
 ## ==============================================================================
@@ -23,6 +27,8 @@
 ## 5. Upstream Provenance Tracking: Ensures all vendor feeds document full 40-character
 ##    commit hashes, upstream URLs, and valid licenses in MANIFEST.json.
 ## ==============================================================================
+
+"""Unit tests for twu_yara_vet.py (rule vetting, tamper detection, manifest checks)."""
 
 import json
 import shutil

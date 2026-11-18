@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+## Program: yara-threat-defense-engine - twu_scan.py
+## Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+## Last Modified: 2026-11-18
+## Purpose: This file scans files with YARA rules and ClamAV, combines the results into one fail-closed verdict (CLEAN, SUSPICIOUS, INFECTED or COULD-NOT-SCAN), and writes a SHA-256 receipt.
 ## ==============================================================================
 ## TWU THREAT DEFENSE ENGINE: DUAL-ENGINE MALWARE SCANNER (YARA + CLAMAV)
 ## ==============================================================================
@@ -589,6 +593,7 @@ def _collect(paths, max_bytes):
     entries = []
 
     def add(p, top):
+        """Record one path (symlink, file or directory) as a candidate or a skip entry."""
         try:
             st = os.lstat(p)
         except OSError as e:
