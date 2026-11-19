@@ -1,7 +1,11 @@
+# Build system (PEP 517/518): pip installs setuptools >= 61 (first release with full [project] support) and builds
+# with its standard backend. This repo ships scripts and YARA rule data, not an importable package.
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+# Core metadata shown on package indexes and by `pip show`. `requires-python` matches the CI matrix; the project
+# uses only the standard library, so `dependencies` below is empty (the yara/clamscan binaries are external tools).
 [project]
 name = "yara-threat-defense-engine"
 version = "1.0.0"
@@ -12,6 +16,7 @@ license = { text = "MIT" }
 authors = [
     { name = "Ethan REDACTED", email = "ethan@REDACTED" }
 ]
+# Search keywords for package indexes (no effect on behaviour).
 keywords = [
     "security",
     "yara",
@@ -25,6 +30,7 @@ keywords = [
     "offline-security",
     "devsecops",
 ]
+# Trove classifiers: audience, topic, supported Python versions and OSes (POSIX Linux and macOS only, as the scanner shells out to local tools).
 classifiers = [
     "Intended Audience :: System Administrators",
     "Intended Audience :: Information Technology",
@@ -40,8 +46,10 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
 ]
+# Deliberately empty: zero runtime Python dependencies keeps the scanner auditable and installable offline.
 dependencies = []
 
+# Links rendered on the project page.
 [project.urls]
 Homepage = "https://github.com/Ethan-da-Tech-Wizard/yara-threat-defense-engine"
 Repository = "https://github.com/Ethan-da-Tech-Wizard/yara-threat-defense-engine"
