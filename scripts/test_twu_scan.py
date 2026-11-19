@@ -396,6 +396,8 @@ class PinnedFixtures(Base):
     any mutation invalidates the hash and rescans it as suspicious.
     """
 
+    # This subclass tests the YARA-only path, so the base fixture's ClamAV stub is
+    # swapped for one that never reports a match.
     def setUp(self):
         super().setUp()
         ## Patch the mock so ClamAV never matches: isolates the YARA-only path.
