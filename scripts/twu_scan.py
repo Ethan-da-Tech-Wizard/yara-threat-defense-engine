@@ -67,26 +67,41 @@
 ## -----------------------------------------------------------------------------
 ## SECTION 1: IMPORTS & RUNTIME ENVIRONMENT INITIALIZATION
 ## -----------------------------------------------------------------------------
+## Standard library only: the scanner must run on a locked-down host with no pip
+## installs, so every dependency here ships with Python itself.
 import argparse
+## hashlib: SHA-256 of scanned files and of the input path set (receipt names).
 import hashlib
+## json: receipts, manifests and --json output are all JSON documents.
 import json
 import os
 import platform
 import re
+## shutil.which: PATH lookup for yara/clamscan/freshclam.
 import shutil
+## stat: S_ISLNK / S_ISREG predicates used to classify candidates from lstat().
 import stat
+## subprocess: the ONLY way scanned content reaches an engine (never exec/import).
 import subprocess
 import sys
+## tempfile: private staging directory and atomic-write scratch files.
 import tempfile
 import time
 from pathlib import Path
 
 ## Base directory setup: Anchors to repository root
+## HERE is scripts/; resolve() collapses symlinks so REPO is stable however the
+## script is invoked (relative path, symlink, cron).
 HERE = Path(__file__).resolve().parent
+## REPO is the repository root; data/yara_rules and data/health hang off it.
 REPO = HERE.parent
+## Make sibling modules (twu_yara_vet, twu_toolparity, twu_autonomy) importable
+## when this file is run directly as a script.
 sys.path.insert(0, str(HERE))
 
 ## System hostname identification for multi-node audit provenance
+## Short hostname (domain stripped); falls back to a literal when unset so file
+## names derived from it are never empty.
 HOST = platform.node().split(".")[0] or "host"
 
 ## -----------------------------------------------------------------------------
@@ -94,6 +109,8 @@ HOST = platform.node().split(".")[0] or "host"
 ## -----------------------------------------------------------------------------
 ## Severity ranking: Higher numerical value indicates higher threat priority.
 ## Used in synthesis to compute overall scan verdict across multiple targets.
+## Ordering matters: COULD-NOT-SCAN ranks BELOW detections so a real hit is never
+## masked by an unrelated error, yet ABOVE CLEAN so uncertainty is never clean.
 VERDICT_RANK = {
     "CLEAN": 0,           ## Safe: Both engines ran, zero detections
     "COULD-NOT-SCAN": 1,  ## Inconclusive: Errors, timeouts, or permission limits
@@ -102,6 +119,8 @@ VERDICT_RANK = {
 }
 
 ## Standard POSIX exit status codes for CLI automation and CI/CD pipelines
+## Exit codes are the contract with CI: 0 pass, 1 threat found, 2 tool/scan failure.
+## SUSPICIOUS and INFECTED deliberately share 1 so pipelines need one check.
 EXIT = {
     "CLEAN": 0,           ## Pipeline succeeds: All scanned files verified clean
     "SUSPICIOUS": 1,      ## Pipeline fails: Security warning, heuristic anomaly
@@ -110,10 +129,13 @@ EXIT = {
 }
 
 ## Operational guardrails and thresholds
+## Size cap: engines load/scan whole files, so very large inputs are refused
+## (reported COULD-NOT-SCAN, never silently skipped as clean).
 DEFAULT_MAX_BYTES = 200 * 1024 * 1024  ## 200 MiB per-file cap to prevent memory exhaustion
 DEFAULT_TIMEOUT = 300                  ## 5-minute watchdog timer per scan invocation
 SIG_MAX_AGE_DAYS = 7                   ## Max acceptable age for ClamAV signature database
 RULES_MAX_AGE_DAYS = 90                ## Max recommended age for vetted YARA rules
+## The three external binaries this module drives; status() reports each one.
 TOOL_NAMES = ("yara", "clamscan", "freshclam")
 
 
@@ -126,6 +148,7 @@ def exit_code(verdict):
     Returns:
         int: 0 for CLEAN, 1 for SUSPICIOUS/INFECTED, 2 for COULD-NOT-SCAN.
     """
+    ## Unknown verdicts map to 3 so a logic bug can never look like success.
     return EXIT.get(verdict, 3)
 
 
@@ -145,12 +168,16 @@ def _which(cmd):
         str | None: Absolute path to executable if runnable, else None.
     """
     try:
+        ## Preferred path: the shared helper knows the fleet's extra tool locations.
         import twu_toolparity
         return twu_toolparity.which_with_local(cmd)
+    ## Helper missing or broken: fall back to the plain PATH + ~/.local/bin search
+    ## so the scanner still works standalone.
     except Exception:
         p = shutil.which(cmd)
         if p:
             return p
+        ## User-space installs (no root) live here and are often not on PATH (cron, launchd).
         c = Path.home() / ".local" / "bin" / cmd
         return str(c) if c.is_file() and os.access(str(c), os.X_OK) else None
 
@@ -161,6 +188,7 @@ def find_tools():
     Returns:
         dict[str, str | None]: Map of tool name to discovered binary path.
     """
+    ## Values are None for missing tools; callers decide whether that is fatal.
     return {n: _which(n) for n in TOOL_NAMES}
 
 
@@ -174,6 +202,7 @@ def default_db_dir():
     Returns:
         Path: Target directory where CVD/CLD signature databases reside.
     """
+    ## Per-user database location used by non-root installs.
     user = Path.home() / ".local" / "share" / "clamav"
     if sys.platform == "darwin" or user.is_dir():
         return user
@@ -191,6 +220,9 @@ def _run(argv, timeout, cwd=None):
     Returns:
         tuple[int, str, str]: (returncode, stdout_text, stderr_text)
     """
+    ## argv is a list and shell=False (default): no shell ever parses a path.
+    ## errors="replace" keeps odd bytes in engine output from raising.
+    ## timeout raises TimeoutExpired, which callers convert to COULD-NOT-SCAN.
     r = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=timeout, cwd=cwd)
     return r.returncode, (r.stdout or ""), (r.stderr or "")
 
@@ -205,6 +237,7 @@ def _default_runner(argv, timeout):
     Returns:
         tuple[int, str]: (returncode, combined_stdout_and_stderr)
     """
+    ## Merge streams: freshclam writes progress to stdout and errors to stderr.
     rc, out, err = _run(argv, timeout)
     return rc, out + err
 
@@ -218,6 +251,7 @@ def sha256(path):
     Returns:
         str: 64-character hexadecimal SHA-256 digest.
     """
+    ## Hash in 1 MiB chunks so memory stays flat for files up to the size cap.
     h = hashlib.sha256()
     with open(str(path), "rb") as f:
         for b in iter(lambda: f.read(1 << 20), b""):
@@ -245,16 +279,22 @@ def write_atomic(path, doc, unique=False):
     ensures write-once immutability for forensic records: if the target filename
     already exists, an incrementing index is appended until an unused slot is found.
     """
+    ## Normalise first so str and Path callers behave identically.
     path = Path(path)
+    ## Receipt directories (data/health/scans) are created on demand.
     path.parent.mkdir(parents=True, exist_ok=True)
+    ## Temp file in the SAME directory as the target so rename/link stays on one
+    ## filesystem (cross-device renames are not atomic). mkstemp creates it 0600.
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=1, sort_keys=True)
             f.write("\n")
+        ## Overwrite mode (status/proposal files): replace() is an atomic swap.
         if not unique:
             os.replace(tmp, str(path))
             return path
+        ## Write-once mode: try name, name-1, name-2 ... until a free slot is found.
         n = 0
         while True:
             final = path if n == 0 else path.with_name("%s-%d%s" % (path.stem, n, path.suffix))
@@ -265,6 +305,7 @@ def write_atomic(path, doc, unique=False):
                 n += 1
     finally:
         try:
+            ## The temp name is always removed: on success the hard link keeps the data alive.
             os.unlink(tmp)
         except OSError:
             pass
@@ -283,13 +324,16 @@ def tool_version(path, timeout=15):
     Returns:
         str | None: Extracted version number or None.
     """
+    ## Tool not installed: no version to report.
     if not path:
         return None
     try:
         rc, out, err = _run([path, "--version"], timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
+    ## Some tools print their banner to stderr, so inspect both.
     text = out + err
+    ## Prefer the 'ClamAV x.y.z' banner; fall back to the first dotted number (yara prints a bare version).
     m = re.search(r"ClamAV\s+(\d+(?:\.\d+)*)", text) or re.search(r"(\d+\.\d+(?:\.\d+)*)", text)
     return m.group(1) if m else None
 
@@ -304,8 +348,11 @@ def signature_info(db_dir, now=None):
     Returns:
         dict: {dir, present, age_days, fresh}
     """
+    ## Injectable clock keeps age maths deterministic in tests.
     now = now if now is not None else time.time()
     db = Path(db_dir) if db_dir else None
+    ## Freshness is judged by the NEWEST database file: ClamAV ships several
+    ## (main/daily/bytecode) updated at different times.
     newest = None
     if db and db.is_dir():
         for f in db.iterdir():
@@ -314,6 +361,7 @@ def signature_info(db_dir, now=None):
                 newest = max(newest or 0, f.stat().st_mtime)
     if newest is None:
         return {"dir": str(db) if db else None, "present": False, "age_days": None, "fresh": False}
+    ## Seconds to fractional days.
     age = (now - newest) / 86400.0
     return {"dir": str(db), "present": True, "age_days": round(age, 2), "fresh": age <= SIG_MAX_AGE_DAYS}
 
@@ -331,12 +379,16 @@ def rules_info(rules_dir, now=None, check_files=True):
     """
     now = now if now is not None else time.time()
     rd = Path(rules_dir)
+    ## Start pessimistic (ok=False); only a fully verified ruleset flips it to True.
     info = {"dir": str(rd), "rule_count": 0, "files": 0, "built": None, "age_days": None, "problems": [], "ok": False}
     try:
+        ## MANIFEST.json is written by twu_yara_vet at build time; it records every rule
+        ## file's hash and the rule count, and is the anchor for integrity checking.
         man = json.loads((rd / "MANIFEST.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         info["problems"].append("MANIFEST.json unreadable: %s" % e)
         return info
+    ## Counts come from the manifest, not by re-parsing the rules (cheap and tamper-evident).
     info["rule_count"] = int(man.get("rule_count", 0))
     info["files"] = len(man.get("files", []))
     info["built"] = man.get("built")
@@ -344,12 +396,16 @@ def rules_info(rules_dir, now=None, check_files=True):
         info["age_days"] = round((now - man["built_epoch"]) / 86400.0, 2)
     if check_files:
         try:
+            ## Imported lazily: only needed for hash verification, and a missing helper should
+            ## be reported as a problem, not crash status.
             import twu_yara_vet
             info["problems"] = twu_yara_vet.verify(rd, compile_index=False)
         except Exception as e:
             info["problems"].append("integrity check failed: %s" % e)
     if not (rd / "index.yar").is_file():
         info["problems"].append("index.yar missing")
+    ## Usable only if verification is clean AND at least one rule exists (an empty
+    ## ruleset would 'pass' every file).
     info["ok"] = not info["problems"] and info["rule_count"] > 0
     return info
 
@@ -367,6 +423,7 @@ def load_exclusions(rules_dir):
         set[str]: Set of rule identifiers to suppress during scanning.
     """
     try:
+        ## Missing/corrupt exclusions file => no exclusions (the safe, stricter default).
         d = json.loads((Path(rules_dir) / "EXCLUSIONS.json").read_text(encoding="utf-8"))
         return set(e["rule"] for e in d.get("excluded", []))
     except (OSError, ValueError, KeyError, TypeError):
@@ -384,6 +441,7 @@ def load_fixtures(rules_dir):
     """
     try:
         d = json.loads((Path(rules_dir) / "EXCLUSIONS.json").read_text(encoding="utf-8"))
+        ## Entries with a non-string path or empty sha256 are ignored rather than trusted.
         out = {}
         for e in d.get("fixtures", []):
             if isinstance(e, dict) and isinstance(e.get("path"), str) and isinstance(e.get("sha256"), str) and e["sha256"]:
@@ -413,9 +471,12 @@ def _pinned_fixture(path, sha, root, fixtures):
         bool: True only if path is inside repository and matches pinned SHA-256.
     """
     try:
+        ## realpath on both sides defeats symlink tricks (a link inside the repo pointing
+        ## outside it must not inherit a fixture exemption).
         rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
     except ValueError:
         return False
+    ## Outside the repository (or different drive): never pinned.
     if rel.startswith("..") or os.path.isabs(rel):
         return False
     return bool(sha) and fixtures.get(rel.replace(os.sep, "/")) == sha
@@ -438,9 +499,11 @@ def status(root=REPO, tools=None, db_dir=None, rules_dir=None, now=None):
     tools = tools if tools is not None else find_tools()
     rules_dir = Path(rules_dir) if rules_dir else root / "data" / "yara_rules"
     now = now if now is not None else time.time()
+    ## freshclam is optional for scanning, so only yara/clamscan are required below.
     tinfo = {n: {"path": tools.get(n), "version": tool_version(tools.get(n))} for n in TOOL_NAMES}
     sig = signature_info(db_dir if db_dir is not None else default_db_dir(), now)
     rules = rules_info(rules_dir, now)
+    ## Human-readable reasons the scanner is NOT ACTIVE; empty list == ready.
     problems = []
     for n in ("yara", "clamscan"):
         if not tinfo[n]["path"]:
@@ -456,6 +519,7 @@ def status(root=REPO, tools=None, db_dir=None, rules_dir=None, now=None):
         "tools": tinfo,
         "rules": rules,
         "signatures": sig,
+        ## active is the single boolean other tooling (health checks, exit code) keys on.
         "active": not problems,
         "problems": problems,
         "ts": now,
@@ -478,10 +542,13 @@ def _decide(action, root, decider=None):
     """
     try:
         if decider:
+            ## Test/operator override of the autonomy policy.
             return decider(action)
+        ## Shared fleet policy: returns ALLOW / PROPOSE / NEVER for the action on this host.
         import twu_autonomy
         return twu_autonomy.decide(action, Path(root), HOST)
     except Exception:
+        ## Policy unavailable => ask a human; never auto-update by default.
         return "PROPOSE"
 
 
@@ -496,6 +563,7 @@ def update_items(st, root, decider=None):
     Returns:
         list[dict]: List of update proposals.
     """
+    ## Each item is a dict the status banner and the proposals file both consume.
     items = []
     sig, rules = st["signatures"], st["rules"]
     if st["tools"]["clamscan"]["path"] and (not sig["present"] or not sig["fresh"]):
@@ -509,6 +577,7 @@ def update_items(st, root, decider=None):
             "class": _decide("update_clamav_signatures", root, decider),
             "approve": "python3 scripts/twu_scan.py update-signatures --approve",
         })
+    ## Rules are refreshed from pinned upstream commits by a human, so we only nag.
     if rules["age_days"] is not None and rules["age_days"] > RULES_MAX_AGE_DAYS:
         items.append({
             "id": "yara-rules",
@@ -532,11 +601,14 @@ def write_updates(root, items, now=None):
         "host": HOST,
         "ts": now if now is not None else time.time(),
         "items": items,
+        ## The note documents the approval model for whoever reads the JSON later.
         "note": "PROPOSE-class: nothing is fetched until Ethan approves.",
     }
     try:
+        ## One file per host so multi-node setups do not clobber each other.
         write_atomic(Path(root) / "data" / "health" / ("scan_updates.%s.json" % HOST), doc)
     except OSError:
+        ## Best-effort bookkeeping: a read-only disk must not fail the scan.
         pass
 
 
@@ -556,9 +628,12 @@ def update_signatures(root=REPO, approve=False, tools=None, decider=None, runner
     """
     tools = tools if tools is not None else find_tools()
     cmd = "python3 scripts/twu_scan.py update-signatures --approve"
+    ## Policy gate runs BEFORE any network-capable step.
     cls = _decide("update_clamav_signatures", root, decider)
+    ## NEVER is absolute: even --approve cannot override policy.
     if cls == "NEVER":
         return {"status": "refused", "detail": "policy says NEVER"}
+    ## Default is a dry run that only prints the exact command to approve.
     if not approve:
         return {"status": "proposal", "detail": "Update available. Approve with: " + cmd}
     fc = tools.get("freshclam")
@@ -571,6 +646,7 @@ def update_signatures(root=REPO, approve=False, tools=None, decider=None, runner
         return {"status": "failed", "detail": str(e)}
     if rc == 0:
         return {"status": "updated", "detail": (out or "").strip()[-300:]}
+    ## On Linux the system DB is root-owned, so a user-run freshclam usually fails.
     hint = "" if sys.platform == "darwin" else " On Linux the system database needs: sudo freshclam"
     return {"status": "failed", "detail": ((out or "").strip()[-300:] + hint)}
 
@@ -596,14 +672,18 @@ def _collect(paths, max_bytes):
     Returns:
         list[dict]: Collected file candidate records.
     """
+    ## Each entry is {path, skip|None, size}; skipped entries become COULD-NOT-SCAN later.
     entries = []
 
+    ## top=True means the user named this path explicitly (vs found by walking).
     def add(p, top):
         try:
+            ## lstat, not stat: inspect the link itself and never follow it.
             st = os.lstat(p)
         except OSError as e:
             entries.append({"path": p, "skip": "cannot stat: %s" % e.strerror})
             return
+        ## Nested links are silently ignored (walk noise); explicit ones are reported.
         if stat.S_ISLNK(st.st_mode):
             if top:
                 entries.append({"path": p, "skip": "is a symlink (not followed; scan the real file)"})
@@ -612,6 +692,7 @@ def _collect(paths, max_bytes):
             if top:
                 entries.append({"path": p, "skip": "not a regular file"})
             return
+        ## Oversize files are recorded as skipped so the verdict cannot be CLEAN.
         if st.st_size > max_bytes:
             entries.append({
                 "path": p,
@@ -621,9 +702,12 @@ def _collect(paths, max_bytes):
         entries.append({"path": p, "skip": None, "size": st.st_size})
 
     for raw in paths:
+        ## Absolute path so the receipt is unambiguous regardless of the cwd.
         p = os.path.abspath(raw)
         if os.path.isdir(p) and not os.path.islink(p):
+            ## followlinks=False: a symlinked directory must not lead the walk elsewhere.
             for r, ds, fs in os.walk(p, followlinks=False):
+                ## Sorted for deterministic ordering (stable receipts and alias numbering).
                 for f in sorted(fs):
                     add(os.path.join(r, f), False)
         else:
@@ -631,6 +715,7 @@ def _collect(paths, max_bytes):
     return entries
 
 
+## Matches the anonymous staging names (f0000000 ...) inside engine output lines.
 ALIAS_RE = re.compile(r"\bf\d{7}\b")
 
 
@@ -646,6 +731,7 @@ def _file_errors(text, engine):
     """
     out = {}
     for line in text.splitlines():
+        ## Only lines that look like errors are mapped back to a file alias.
         if not re.search(r"error|denied|can't|cannot|could not|unable|no such", line, re.I):
             continue
         m = ALIAS_RE.search(line)
@@ -675,6 +761,8 @@ def _engine_clam(clam, aliases, lst, timeout):
         - engine_error: Global error message if engine failed or timed out
         - file_errors: {alias: error_message} for per-file read failures
     """
+    ## --follow-file-symlinks=2 lets clamscan read the staged links (our own, trusted);
+    ## -f takes a file list so no path is ever placed on the command line.
     argv = [clam, "--no-summary", "--follow-file-symlinks=2", "-f", lst]
     try:
         rc, out, err = _run(argv, timeout, cwd=os.path.dirname(lst))
@@ -683,12 +771,15 @@ def _engine_clam(clam, aliases, lst, timeout):
     except OSError as e:
         return {}, "ClamAV could not start: %s" % e, {}
 
+    ## Keyed by basename == alias, which is why aliases must be unique.
     found = {}
     for line in out.splitlines():
+        ## clamscan prints '<path>: <signature> FOUND' for every detection.
         if line.endswith(" FOUND"):
             path, _, sig = line[:-6].rpartition(": ")
             found.setdefault(os.path.basename(path), []).append(sig)
 
+    ## Per-file read errors (permission denied etc.) must not be mistaken for clean.
     ferr = _file_errors(out + "\n" + err, "ClamAV")
     ## ClamAV returns 0 for clean, 1 for virus found. Any other exit code is an engine error.
     if rc not in (0, 1) and not ferr:
@@ -714,6 +805,7 @@ def _engine_yara(yara, index, scandir, excl, timeout):
         - engine_error: Global error message if engine failed or timed out
         - file_errors: {alias: error_message}
     """
+    ## -r recurses the staging dir; index.yar includes every vetted rule file.
     argv = [yara, "-r", str(index), scandir]
     try:
         rc, out, err = _run(argv, timeout, cwd=scandir)
@@ -724,6 +816,7 @@ def _engine_yara(yara, index, scandir, excl, timeout):
 
     found = {}
     for line in out.splitlines():
+        ## yara prints '<rule> <path>' per match; rules in the exclusion set are dropped.
         rule, _, path = line.partition(" ")
         if rule and path and rule not in excl:
             found.setdefault(os.path.basename(path), []).append(rule)
@@ -783,9 +876,11 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
     notes, reasons = [], []
 
     ## Step 1: Collect and validate candidate target files
+    ## list() so generators are consumed once and reused safely.
     entries = _collect(list(paths), max_bytes)
     if not entries:
         reasons.append("nothing to scan: no paths given or nothing found")
+    ## Only non-skipped entries are staged; the rest keep their skip reason as an error.
     scannable = [e for e in entries if not e["skip"]]
     for e in entries:
         e["findings"], e["errors"] = [], []
@@ -796,20 +891,26 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
     if scannable:
         ## Step 2: Anonymous staging sandbox with mode 0700 permissions
         with tempfile.TemporaryDirectory(prefix="twuscan.") as td:
+            ## Owner-only: other local users cannot swap links in the staging area.
             os.chmod(td, 0o700)
             scandir = os.path.join(td, "files")
             os.mkdir(scandir)
             alias = {}
             for i, e in enumerate(scannable):
                 a = "f%07d" % i
+                ## Engines see only the alias; the real (possibly hostile) filename never reaches a
+                ## command line or an engine log, blocking option-injection and escape sequences.
                 os.symlink(e["path"], os.path.join(scandir, a))
                 alias[a] = e
                 e["sha256"] = None
 
+            ## List file for clamscan -f (one staged path per line).
             lst = os.path.join(td, "list.txt")
             with open(lst, "w") as f:
                 f.write("".join(os.path.join(scandir, a) + "\n" for a in alias))
 
+            ## An engine that is not requested is simply not run; one that is requested but
+            ## unavailable is recorded as an engine error (fail closed).
             ## Step 3a: ClamAV Execution (Virus Signatures)
             if "clamav" not in engines:
                 pass
@@ -849,6 +950,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
                             alias[a]["findings"].append({"engine": "yara", "name": r})
 
         ## Step 4: Record cryptographic file hashes
+        ## Hash after the scan so the receipt records exactly the bytes' digest at report time.
         for e in scannable:
             try:
                 e["sha256"] = sha256(e["path"])
@@ -859,6 +961,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
                 e["errors"].append(msg)
 
     ## Step 5: Test fixture exemptions (YARA-only; ClamAV is NEVER ignored)
+    ## Fixtures are intentional attack samples checked into the repo (tests).
     fixtures = load_fixtures(rules_dir)
     for e in scannable if fixtures else []:
         if e["findings"] and all(f["engine"] == "yara" for f in e["findings"]) \
@@ -866,12 +969,15 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
             e["fixture_pinned"] = [f["name"] for f in e["findings"]]
             e["findings"] = []
 
+    ## Sorted + deduplicated for stable, readable reasons.
     for msg in sorted(set(engine_err.values())):
         reasons.append(msg)
 
     ## Step 6: Fail-closed verdict synthesis
+    ## Nothing to scan is itself COULD-NOT-SCAN: an empty scan must not look green.
     files, worst = [], "CLEAN" if entries else "COULD-NOT-SCAN"
     for e in entries:
+        ## Per-file precedence: ClamAV (confirmed) > YARA (suspicious) > errors > clean.
         if any(f["engine"] == "clamav" for f in e["findings"]):
             v = "INFECTED"
         elif e["findings"]:
@@ -899,6 +1005,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
         if e["skip"]:
             reasons.append("%s -> %s" % (e["path"], e["skip"]))
         elif v == "COULD-NOT-SCAN":
+            ## Drop engine-wide messages already listed once in the global reasons.
             own = [x for x in e["errors"] if x not in engine_err.values()]
             if own:
                 reasons.append("%s -> %s" % (e["path"], "; ".join(own)))
@@ -913,6 +1020,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
         })
 
     ## Fail-closed enforcement: if any engine failed, result can never be clean
+    ## Defence in depth: an engine failure can never leave the overall verdict CLEAN.
     if worst == "CLEAN" and engine_err:
         worst = "COULD-NOT-SCAN"
 
@@ -920,6 +1028,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
         reasons.append("both engines ran; no signature or rule matched (this is not proof of safety)")
 
     ## Step 7: Update proposals and notifications
+    ## Staleness is surfaced as a note on every scan so it cannot be ignored forever.
     items = update_items(st, root, decider)
     for it in items:
         notes.append("Note: %s. Update available, needs approval: %s" % (it["why"], it["approve"]))
@@ -927,6 +1036,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
         write_updates(root, items, now)
 
     ## Step 8: Build forensic receipt document
+    ## The receipt schema is versioned (twu.scan.v1) so readers can detect changes.
     doc = {
         "schema": "twu.scan.v1",
         "ts": now,
@@ -955,6 +1065,7 @@ def scan(paths, root=REPO, tools=None, rules_dir=None, db_dir=None, max_bytes=DE
 
     ## Step 9: Atomically persist receipt
     if write_receipt:
+        ## Short digest of the path set disambiguates receipts made in the same second.
         h = hashlib.sha256("\n".join(sorted(e["path"] for e in entries)).encode("utf-8", "replace")).hexdigest()[:8]
         name = "%s-%s.json" % (time.strftime("%Y%m%dT%H%M%S", time.gmtime(now)), h)
         try:
@@ -977,9 +1088,11 @@ def render_scan(doc):
     Returns:
         str: Multi-line formatted terminal string.
     """
+    ## Verdict first so it is the first thing a human or grep sees.
     lines = ["VERDICT: %s" % doc["verdict"]]
     for f in doc["files"]:
         lines.append("%s: %s" % (f["verdict"], f["path"]))
+    ## Cap terminal output; the full list is always in the JSON receipt.
     for r in doc["reasons"][:12]:
         lines.append("  - " + r)
     if len(doc["reasons"]) > 12:
@@ -1034,6 +1147,7 @@ def main(argv=None):
     Returns:
         int: POSIX exit status code.
     """
+    ## One subcommand per operation; --json variants are for machine consumers.
     ap = argparse.ArgumentParser(description="Cross-platform malware scan (YARA + ClamAV)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -1055,8 +1169,10 @@ def main(argv=None):
     ## Subcommand: update-rules
     sub.add_parser("update-rules", help="Display instructions to refresh vetted YARA rules")
 
+    ## argv=None means sys.argv, letting tests pass explicit lists.
     a = ap.parse_args(argv)
 
+    ## Notes go to stderr so stdout (and --json) stays clean for piping.
     if a.cmd == "scan":
         doc = scan(a.paths, max_bytes=a.max_mb * (1 << 20), timeout=a.timeout)
         print(json.dumps(doc, indent=1) if a.json else render_scan(doc))
@@ -1082,5 +1198,6 @@ def main(argv=None):
     return 0
 
 
+## Only run the CLI when executed, not when imported by tests or sibling scripts.
 if __name__ == "__main__":
     sys.exit(main())

@@ -37,7 +37,9 @@
 ##    automatic detection of Windows autorun.inf threat vectors.
 ## ==============================================================================
 
+## contextlib: capture CLI stdout in the main() test.
 import contextlib
+## io.StringIO: stdout capture buffer.
 import io
 import json
 import os
@@ -60,6 +62,7 @@ def fake_scan(verdicts):
     Returns:
         callable: Mock scanner function compatible with `twu_scan.scan()` signature.
     """
+    ## Mirrors twu_scan.scan's (paths, **kw) call shape so it can be injected as scanner.
     def f(paths, **kw):
         files = [
             {
@@ -75,6 +78,7 @@ def fake_scan(verdicts):
             }
             for p in paths
         ]
+        ## Same worst-verdict rule as the real scanner, via the shared rank table.
         worst = max((x["verdict"] for x in files), key=lambda v: ev.twu_scan.VERDICT_RANK[v], default="CLEAN")
         return {"verdict": worst, "files": files, "receipt": "r.json", "reasons": [], "notes": []}
     return f
@@ -88,6 +92,7 @@ class TestScanEvent(unittest.TestCase):
 
     def setUp(self):
         """Create clean temporary repository structure for isolated testing."""
+        ## Isolated fake repo (data/health) plus an input directory.
         self.td = tempfile.TemporaryDirectory()
         self.root = Path(self.td.name) / "repo"
         (self.root / "data" / "health").mkdir(parents=True)
@@ -106,6 +111,7 @@ class TestScanEvent(unittest.TestCase):
 
     def run_new(self, paths, verdicts=None, **kw):
         """Invoke `scan_new()` with mock scanner and zero wait by default."""
+        ## wait=0 and a no-op sleeper: tests never actually sleep.
         return ev.scan_new(
             paths,
             root=self.root,
@@ -117,6 +123,7 @@ class TestScanEvent(unittest.TestCase):
 
     def test_skip_own_files(self):
         """Verify internal control files, receipts, and Syncthing metadata are skipped."""
+        ## Each of these paths must be treated as the scanner's own or VCS noise.
         r = self.root
         for rel in (
             ".git/x",
@@ -140,6 +147,7 @@ class TestScanEvent(unittest.TestCase):
 
     def test_suspicious_writes_alert_moves_nothing(self):
         """Verify non-destructive staging: flagged file remains untouched on disk."""
+        ## Flagged file must remain exactly where it is.
         p = self.mk("bad.bin")
         res = self.run_new([p], {"bad.bin": "INFECTED"})
         self.assertEqual(res["verdict"], "INFECTED")
@@ -151,6 +159,7 @@ class TestScanEvent(unittest.TestCase):
 
     def test_alerts_newest_first_and_capped(self):
         """Verify that alerts are sorted newest-first and capped at MAX_ALERTS limit."""
+        ## Overshoot the cap by 5 to prove truncation drops the OLDEST.
         for i in range(ev.MAX_ALERTS + 5):
             p = self.mk("b%d.bin" % i, b"x%d" % i)
             self.run_new([p], {"b%d.bin" % i: "SUSPICIOUS"})
@@ -164,6 +173,7 @@ class TestScanEvent(unittest.TestCase):
         self.assertEqual(len(self.run_new([p])["scanned"]), 1)
         r2 = self.run_new([p])
         self.assertEqual(len(r2["scanned"]), 0)
+        ## Second pass hits the (size, mtime_ns) cache.
         self.assertEqual(r2["skipped"][0]["why"], "unchanged since last scan")
 
     def test_unstable_file_skipped(self):
@@ -175,6 +185,7 @@ class TestScanEvent(unittest.TestCase):
             root=self.root,
             scanner=fake_scan({}),
             wait=2,
+            ## The 'sleep' rewrites the file, simulating a writer active during the debounce.
             sleeper=lambda s: Path(p).write_bytes(b"more than before"),
         )
         self.assertEqual(res["scanned"], [])
@@ -183,6 +194,7 @@ class TestScanEvent(unittest.TestCase):
     def test_size_cap_is_not_clean(self):
         """Verify that oversized files yield COULD-NOT-SCAN under fail-closed policy."""
         p = self.mk("big.bin", b"x" * 20)
+        ## Use the REAL twu_scan.scan (no receipt) to exercise the oversize path end to end.
         real = lambda paths, **kw: ev.twu_scan.scan(paths, write_receipt=False, **kw)
         res = ev.scan_new([p], root=self.root, scanner=real, wait=0, sleeper=lambda s: None, max_bytes=10)
         self.assertEqual(res["verdict"], "COULD-NOT-SCAN")
@@ -191,12 +203,14 @@ class TestScanEvent(unittest.TestCase):
         """Verify directory expansion filters files outside modification window."""
         new = self.mk("new.txt")
         old = self.mk("old.txt")
+        ## Epoch+1s: far outside the one-day lookback window.
         os.utime(old, (1, 1))
         got = [os.path.basename(p) for p in ev.expand_dirs([str(self.d)])]
         self.assertEqual(got, ["new.txt"])
 
     def test_stability_wait_is_one_sleep_for_all_files(self):
         """Verify scalable debouncing: executes exactly ONE sleep for the entire candidate batch."""
+        ## 30 files: per-file sleeping would show up as 30 calls.
         ps = [self.mk("f%d.txt" % i) for i in range(30)]
         calls = []
         ev.scan_new(ps, root=self.root, scanner=fake_scan({}), wait=2, sleeper=lambda s: calls.append(s))
@@ -225,6 +239,7 @@ class TestScanEvent(unittest.TestCase):
         """Verify CLI main entrypoint outputs operational start/done telemetry."""
         self.mk("m.txt")
         buf = io.StringIO()
+        ## Monkeypatch the scanner for main(); restored via addCleanup.
         real, ev.twu_scan.scan = ev.twu_scan.scan, fake_scan({})
         self.addCleanup(setattr, ev.twu_scan, "scan", real)
         with contextlib.redirect_stdout(buf):
@@ -237,6 +252,7 @@ class TestScanEvent(unittest.TestCase):
 
     def test_gguf_header_pass(self):
         """Verify memory-safe GGUF inspection: evaluates initial header without reading tensors."""
+        ## nbytes=50 below forces a partial (header-only) pass.
         p = self.mk("m.gguf", b"GGUF" + b"\0" * 100)
         out = ev.gguf_header_scan(p, scanner=fake_scan({}), nbytes=50)
         self.assertEqual(out["verdict"], "CLEAN")
@@ -247,6 +263,7 @@ class TestScanEvent(unittest.TestCase):
 
     def test_usb_depth_cap_and_autorun(self):
         """Verify USB containment: enforces directory depth limit and detects autorun.inf."""
+        ## Fake USB volume: depth-4 folder, a top-level file and an autorun.inf.
         v = self.d / "VOL"
         (v / "a/b/c/d").mkdir(parents=True)
         (v / "top.txt").write_text("1")
@@ -264,6 +281,7 @@ class TestScanEvent(unittest.TestCase):
         """Verify removable media discovery ignores symlinked root filesystem volumes."""
         vols = self.d / "Volumes"
         (vols / "USB").mkdir(parents=True)
+        ## Mimics macOS, where the system volume appears under /Volumes as a symlink.
         os.symlink("/", vols / "Macintosh HD")
         self.assertEqual([os.path.basename(x) for x in ev.list_volumes(str(vols))], ["USB"])
 

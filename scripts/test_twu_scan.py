@@ -40,11 +40,14 @@
 import json
 import os
 import shutil
+## stat: used to add the executable bit to the mock engine scripts.
 import stat
+## subprocess: only used by the live-engine tests to probe the ClamAV database.
 import subprocess
 import sys
 import tempfile
 import time
+## unittest: stdlib runner, so the suite needs no third-party packages.
 import unittest
 from pathlib import Path
 
@@ -102,8 +105,11 @@ def mk_tool(d, name, body):
     Returns:
         str: Absolute path to the created executable.
     """
+    ## Mock engines are plain Python scripts started via a #! line, mirroring how the
+    ## real binaries are exec'd by twu_scan.
     p = Path(d) / name
     p.write_text(body)
+    ## Add only the owner execute bit; other permission bits are preserved.
     p.chmod(p.stat().st_mode | stat.S_IXUSR)
     return str(p)
 
@@ -116,18 +122,22 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         """Provision isolated temporary workspace with mock rules and tools."""
+        ## Everything lives under one temp dir removed on cleanup: tests never touch the real repo data.
         self.td = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.td, True)
         self.root = Path(self.td) / "root"
         (self.root / "data" / "yara_rules").mkdir(parents=True)
+        ## Minimal but valid ruleset layout: index, exclusions and manifest are all required by rules_info().
         (self.root / "data" / "yara_rules" / "index.yar").write_text("// empty\n")
         (self.root / "data" / "yara_rules" / "EXCLUSIONS.json").write_text(
             json.dumps({"excluded": [{"rule": "Excluded_Rule"}]})
         )
         (self.root / "data" / "yara_rules" / "MANIFEST.json").write_text(
+            ## rule_count > 0 and an empty file list make the ruleset count as usable without real rules.
             json.dumps({"files": [], "rule_count": 5, "built_epoch": int(time.time())})
         )
         self.bin = Path(self.td) / "bin"
+        ## Directory holding the mock engine executables.
         self.bin.mkdir()
         self.tools = {
             "yara": mk_tool(self.bin, "yara", FAKE_YARA),
@@ -144,6 +154,7 @@ class Base(unittest.TestCase):
 
     def scan(self, *paths, **kw):
         """Invoke scanner with default mock tools and repository root."""
+        ## Default to mock engines so a test never accidentally calls the real ones.
         kw.setdefault("tools", self.tools)
         kw.setdefault("root", self.root)
         return ts.scan(list(paths), **kw)
@@ -157,6 +168,7 @@ class Verdicts(Base):
 
     def test_clean(self):
         """Verify that benign files yield CLEAN verdict and exit code 0."""
+        ## Benign content: neither mock engine reports anything.
         r = self.scan(self.f("a.txt", "hello"))
         self.assertEqual(r["verdict"], "CLEAN")
         self.assertEqual(ts.exit_code(r["verdict"]), 0)
@@ -166,6 +178,7 @@ class Verdicts(Base):
         r = self.scan(self.f("e.com", EICAR))
         self.assertEqual(r["verdict"], "INFECTED")
         self.assertNotEqual(ts.exit_code(r["verdict"]), 0)
+        ## Both engines must have reported independently for the same file.
         engines = {x["engine"] for x in r["files"][0]["findings"]}
         self.assertEqual(engines, {"clamav", "yara"})
 
@@ -184,6 +197,7 @@ class Verdicts(Base):
 
     def test_missing_engine_is_could_not_scan_not_clean(self):
         """Verify fail-closed principle: missing engine NEVER yields CLEAN."""
+        ## None models 'binary not installed'.
         self.tools["clamscan"] = None
         r = self.scan(self.f("a.txt", "hello"))
         self.assertEqual(r["verdict"], "COULD-NOT-SCAN")
@@ -197,6 +211,7 @@ class Verdicts(Base):
 
     def test_oversize_could_not_scan(self):
         """Verify that files exceeding the byte cap yield COULD-NOT-SCAN."""
+        ## 100 bytes against a 10-byte cap.
         r = self.scan(self.f("big.bin", "x" * 100), max_bytes=10)
         self.assertEqual(r["verdict"], "COULD-NOT-SCAN")
         self.assertTrue(any("larger than" in x for x in r["reasons"]))
@@ -208,12 +223,14 @@ class Verdicts(Base):
 
     def test_timeout(self):
         """Verify that engine timeout yields COULD-NOT-SCAN rather than hanging."""
+        ## The mock YARA sleeps 30s on this marker; a 1s timeout must fire first.
         r = self.scan(self.f("s.txt", "MARKER_SLEEP"), timeout=1)
         self.assertEqual(r["verdict"], "COULD-NOT-SCAN")
         self.assertTrue(any("time" in x for x in r["reasons"]))
 
     def test_directory_recursed_worst_wins(self):
         """Verify that scanning a folder evaluates all files and reports the worst verdict."""
+        ## Nested layout proves recursion reaches files below the top level.
         sub = self.data / "d" / "e"
         sub.mkdir(parents=True)
         (sub / "bad").write_text(EICAR)
@@ -226,6 +243,7 @@ class Verdicts(Base):
         """Verify that symlinks are not followed to prevent TOCTOU and traversal attacks."""
         real = self.f("real.txt", EICAR)
         link = self.data / "link"
+        ## The link points at a file containing EICAR: following it would produce a detection.
         os.symlink(real, str(link))
         r = self.scan(str(link))
         self.assertEqual(r["verdict"], "COULD-NOT-SCAN")
@@ -233,10 +251,12 @@ class Verdicts(Base):
 
     def test_never_executes_scanned_file(self):
         """Verify that scanned executable scripts are never executed by the scanner."""
+        ## If the scanner ever executed the script it would create this marker.
         marker = Path(self.td) / "ran"
         p = self.f("script.sh", "#!/bin/sh\ntouch %s\n" % marker)
         os.chmod(p, 0o755)
         self.scan(p)
+        ## No marker => the file was only read, never run.
         self.assertFalse(marker.exists())
 
     def test_weird_filename(self):
@@ -248,6 +268,7 @@ class Verdicts(Base):
         """Verify that filenames with embedded newlines do not break parser logic."""
         r = self.scan(self.f("a\nb.txt", EICAR))
         self.assertIn(r["verdict"], ("INFECTED", "SUSPICIOUS", "COULD-NOT-SCAN"))
+        ## Any non-clean outcome is acceptable; an undetected EICAR is not.
         self.assertNotEqual(r["verdict"], "CLEAN")
 
     def test_exit_code_contract(self):
@@ -276,9 +297,11 @@ class Receipts(Base):
     def test_receipt_written_atomically(self):
         """Verify that receipts are written atomically with SHA-256 and verified schema."""
         r = self.scan(self.f("a.txt", "hello"))
+        ## Receipts directory created by write_atomic().
         d = self.root / "data" / "health" / "scans"
         files = list(d.glob("*.json"))
         self.assertEqual(len(files), 1)
+        ## No leftover temp files: the atomic-write cleanup ran.
         self.assertEqual(list(d.glob("*.tmp")), [])
         doc = json.loads(files[0].read_text())
         self.assertEqual(doc["verdict"], "CLEAN")
@@ -301,11 +324,13 @@ class StatusAndUpdates(Base):
 
     def _db(self, days_old):
         """Helper to create a fake ClamAV CVD file with specific age."""
+        ## Fake ClamAV database dir; only the file's mtime matters to signature_info().
         db = Path(self.td) / "db"
         db.mkdir(exist_ok=True)
         p = db / "daily.cvd"
         p.write_text("x")
         t = time.time() - days_old * 86400
+        ## Backdate atime/mtime to simulate an old database.
         os.utime(str(p), (t, t))
         return db
 
@@ -317,10 +342,12 @@ class StatusAndUpdates(Base):
 
     def test_stale_db_creates_proposal_not_fetch(self):
         """Verify that stale signature databases generate proposals without unapproved network requests."""
+        ## Records which policy actions were consulted.
         called = []
         ts.scan([self.f("a.txt", "hi")], tools=self.tools, root=self.root, db_dir=self._db(9),
                 decider=lambda a: called.append(a) or "PROPOSE")
         self.assertIn("update_clamav_signatures", called)
+        ## Proposal file is the only side effect: nothing may be downloaded.
         prop = json.loads(next((self.root / "data" / "health").glob("scan_updates.*.json")).read_text())
         self.assertEqual(prop["items"][0]["action"], "update_clamav_signatures")
         self.assertEqual(prop["items"][0]["class"], "PROPOSE")
@@ -341,11 +368,13 @@ class StatusAndUpdates(Base):
     def test_update_refused_when_policy_never(self):
         """Verify that autonomous policy refusal (NEVER) aborts update."""
         out = ts.update_signatures(root=self.root, approve=True, tools=self.tools, decider=lambda a: "NEVER",
+                                   ## Any attempt to run freshclam fails the test.
                                    runner=lambda *a, **k: self.fail("fetched"))
         self.assertEqual(out["status"], "refused")
 
     def test_update_runs_freshclam_when_approved(self):
         """Verify that approved update executes freshclam binary."""
+        ## Captures the argv handed to the fake runner.
         seen = []
         out = ts.update_signatures(root=self.root, approve=True, tools={"freshclam": "/x/freshclam"},
                                    decider=lambda a: "PROPOSE", runner=lambda argv, t: seen.append(argv) or (0, "ok"))
@@ -369,7 +398,9 @@ class PinnedFixtures(Base):
 
     def setUp(self):
         super().setUp()
+        ## Patch the mock so ClamAV never matches: isolates the YARA-only path.
         self.tools["clamscan"] = mk_tool(self.bin, "clam2", FAKE_CLAM.replace('b"EICAR" in d', 'False'))
+        ## Fixture paths are repo-relative, so the fixture must live inside the fake repo root.
         (self.root / "scripts").mkdir()
         self.fx = self.root / "scripts" / "test_fix.py"
         self.fx.write_text("# " + EICAR + "\n")
@@ -378,6 +409,7 @@ class PinnedFixtures(Base):
     def pin(self, path, rel="scripts/test_fix.py"):
         """Pin a fixture in EXCLUSIONS.json with its exact SHA-256 hash."""
         import hashlib
+        ## Pin by content hash: any later edit invalidates the exemption.
         h = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         ex = self.root / "data" / "yara_rules" / "EXCLUSIONS.json"
         d = json.loads(ex.read_text())
@@ -399,6 +431,7 @@ class PinnedFixtures(Base):
     def test_same_bytes_at_other_path_not_allowed(self):
         """Verify that exemption requires path match (same bytes elsewhere are flagged)."""
         other = self.root / "scripts" / "other.py"
+        ## Identical bytes but a different path: the pin is path AND hash.
         other.write_bytes(self.fx.read_bytes())
         self.assertEqual(self.scan(str(other))["verdict"], "SUSPICIOUS")
 
@@ -418,6 +451,7 @@ class PinnedFixtures(Base):
         """Verify that corrupted fixture schemas fail closed and flag suspicious files."""
         ex = self.root / "data" / "yara_rules" / "EXCLUSIONS.json"
         d = json.loads(ex.read_text())
+        ## Garbage entries must be ignored, leaving the file un-exempted (fail closed).
         d["fixtures"] = ["junk", {"path": 5}, {"path": "scripts/test_fix.py"}]
         ex.write_text(json.dumps(d))
         self.assertEqual(self.scan(str(self.fx))["verdict"], "SUSPICIOUS")
@@ -431,6 +465,7 @@ class RealRules(unittest.TestCase):
 
     def setUp(self):
         """Verify availability of native yara, clamscan, and signature database."""
+        ## Real-engine tests: skipped unless both engines and a signature DB exist.
         self.tools = ts.find_tools()
         if not self.tools.get("yara") or not self.tools.get("clamscan"):
             self.skipTest("yara or clamscan not installed")
@@ -438,6 +473,7 @@ class RealRules(unittest.TestCase):
             self.skipTest("ClamAV signatures not installed / present on this host")
         ## Verify ClamAV database is valid and readable without errors
         db_dir = ts.default_db_dir()
+        ## Probe a scan of /dev/null: exit 0/1 means the DB loads, anything else means unusable.
         chk = subprocess.run([self.tools["clamscan"], "--database=" + str(db_dir), "/dev/null"], capture_output=True)
         if chk.returncode not in (0, 1):
             self.skipTest("ClamAV database not fully initialized (%s)" % chk.stderr.decode().strip()[:80])
@@ -446,12 +482,14 @@ class RealRules(unittest.TestCase):
 
     def test_manifest_verifies(self):
         """Verify cryptographic integrity of repository ruleset against MANIFEST.json."""
+        ## Real manifest vs real rule files on disk.
         import twu_yara_vet as v
         self.assertEqual(v.verify(), [])
 
     def test_real_eicar_caught_by_both(self):
         """Verify that live YARA and ClamAV engines both detect the EICAR string."""
         p = Path(self.td) / "eicar.txt"
+        ## EICAR is the industry-standard harmless test string both engines recognise.
         p.write_text(EICAR)
         r = ts.scan([str(p)], tools=self.tools, root=Path(self.td) / "r", rules_dir=ts.REPO / "data" / "yara_rules",
                     timeout=300, write_receipt=False)

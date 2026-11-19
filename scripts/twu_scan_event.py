@@ -72,37 +72,56 @@
 ## -----------------------------------------------------------------------------
 ## SECTION 1: IMPORTS & GLOBAL CONFIGURATION CONSTANTS
 ## -----------------------------------------------------------------------------
+## argparse: CLI for the scan-new and usb subcommands.
 import argparse
+## json: state cache, alert log and --json output.
 import json
 import os
 import platform
+## stat: S_ISDIR / S_ISREG to classify event paths from lstat().
 import stat
 import sys
+## tempfile: scratch directory for the GGUF header slice.
 import tempfile
 import time
 from pathlib import Path
 
 ## Base directory setup: Anchors to repository root
+## Anchor paths to this file so the script works from any cwd (hooks, cron).
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
+## Allow `import twu_scan` (a sibling module) when run as a plain script.
 sys.path.insert(0, str(HERE))
+## All real scanning is delegated to twu_scan; this module only decides WHAT to
+## scan and what to do with the answer.
 import twu_scan  # noqa: E402
 
 ## Node identification for multi-device cluster tracking
+## Per-host state/alert file names keep synced multi-machine repos conflict free.
 HOST = platform.node().split(".")[0] or "host"
 
 ## Operational guardrails and thresholds
+## Bounded so the alert file stays small enough to read at a glance.
 MAX_ALERTS = 50                      ## Maximum alert history retained in rolling alert log
+## Bounded so the dedupe cache cannot grow without limit on busy trees.
 MAX_STATE = 5000                     ## Maximum file paths tracked in deduplication cache
+## Larger than twu_scan's default because synced folders hold big assets; files
+## over the cap are still passed on so they surface as COULD-NOT-SCAN.
 DEFAULT_MAX_BYTES = 500 * 1024 * 1024  ## 500 MiB upper limit for event-triggered files
+## A file that is still growing (download, sync) would be scanned truncated.
 STABLE_SECONDS = 2.0                 ## Debounce interval to ensure file writes completed
+## GGUF metadata lives at the start of the file, so a 16 MiB prefix covers it.
 GGUF_HEADER_BYTES = 16 * 1024 * 1024  ## 16 MiB window for scanning ML model headers
+## Caps for untrusted removable media: bound traversal time and memory.
 USB_DEPTH = 3                        ## Maximum directory depth scanned on external media
 USB_MAX_FILES = 5000                 ## Maximum file count threshold for USB drives
 
 ## Directory segments and filenames excluded from event processing
+## Path components that mark tool bookkeeping rather than user content.
 SKIP_PARTS = (".git", ".stversions", ".stfolder", ".hg", ".svn")
+## Exact filenames that are always noise.
 SKIP_NAMES = (".DS_Store", ".stignore", ".stfolder")
+## Reuse the single severity ordering so both modules always agree.
 RANK = twu_scan.VERDICT_RANK
 
 
@@ -115,6 +134,7 @@ def _stamp(t=None):
     Returns:
         str: YYYY-MM-DD HH:MM:SS formatted string.
     """
+    ## `t or time.time()`: a falsy t (None/0) means 'now'.
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t or time.time()))
 
 
@@ -128,6 +148,7 @@ def _worse(a, b):
     Returns:
         str: Higher-ranking verdict.
     """
+    ## Ties keep `a`; with equal ranks the choice is immaterial.
     return a if RANK[a] >= RANK[b] else b
 
 
@@ -149,12 +170,15 @@ def skip_reason(path, root=REPO):
     Returns:
         str | None: String reason if file should be skipped, else None.
     """
+    ## Absolute + normalised so prefix comparisons below are reliable.
     p = os.path.abspath(path)
+    ## Split into components: matching whole components avoids false hits like 'my.github'.
     parts = Path(p).parts
     base = os.path.basename(p)
 
     ## 1. Skip VCS internal metadata and version control history
     if any(x in SKIP_PARTS for x in parts):
+        ## Returned strings double as the user-visible 'skipped' reason.
         return "inside .git / Syncthing versions"
 
     ## 2. Skip temporary partial downloads or OS clutter
@@ -168,9 +192,11 @@ def skip_reason(path, root=REPO):
         return "temporary or bookkeeping file"
 
     ## 3. Skip scanner's own receipts and rule directories
+    ## Our own outputs live under data/; scanning them would create a feedback loop.
     r = os.path.abspath(str(root))
     for rel in ("data/health/scans", "data/yara_rules"):
         d = os.path.join(r, rel)
+        ## Trailing separator prevents 'data/yara_rules_old' matching 'data/yara_rules'.
         if p == d or p.startswith(d + os.sep):
             return "our own receipts or rules"
 
@@ -193,6 +219,7 @@ def _sig(path):
     Returns:
         tuple[int, int]: (file_size_bytes, mtime_nanoseconds)
     """
+    ## lstat: never follow links; ns-resolution mtime catches rapid rewrites.
     st = os.lstat(path)
     return st.st_size, int(st.st_mtime_ns)
 
@@ -209,10 +236,13 @@ def _stable(path, wait, sleeper):
         bool: True if stat signature remained identical across the wait window.
     """
     try:
+        ## Snapshot before the wait.
         a = _sig(path)
         if wait:
             sleeper(wait)
+        ## Equal snapshots => no writer touched the file during the window.
         return a == _sig(path)
+    ## A vanished or unreadable file is treated as not stable (skipped).
     except OSError:
         return False
 
@@ -226,6 +256,7 @@ def _state_path(root):
     Returns:
         Path: Path to scan_event_state.<host>.json
     """
+    ## State is per host: it is a local cache of what this machine already scanned.
     return Path(root) / "data" / "health" / ("scan_event_state.%s.json" % HOST)
 
 
@@ -240,6 +271,7 @@ def _load(path, default):
         Parsed JSON object or default value.
     """
     try:
+        ## A corrupt/missing cache just means rescanning more; it never blocks.
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
@@ -261,7 +293,9 @@ def sentence(path, verdict, findings):
     Returns:
         str: Human-readable guidance message.
     """
+    ## At most four rule/signature names keep the message readable.
     names = ", ".join(sorted({f.get("name", "?") for f in findings})[:4]) or "a scanner match"
+    ## INFECTED = ClamAV signature; otherwise a YARA heuristic.
     kind = "matched a virus signature" if verdict == "INFECTED" else "matched a suspicious-file rule"
     return (
         "%s: %s %s (%s). Do not open or run it. Nothing was moved or deleted; tell Ethan and see "
@@ -284,9 +318,12 @@ def write_alerts(root, new_alerts, now=None):
     """
     if not new_alerts:
         return None
+    ## Single rolling alert file per host.
     p = Path(root) / "data" / "health" / ("scan_alerts.%s.json" % HOST)
     doc = _load(p, {})
+    ## Defensive isinstance check: a hand-edited or corrupt file must not crash alerting.
     old = doc.get("alerts", []) if isinstance(doc, dict) else []
+    ## Newest first, truncated to the retention limit.
     alerts = (list(reversed(new_alerts)) + old)[:MAX_ALERTS]
     out = {
         "schema": "twu.scan_alerts.v1",
@@ -295,12 +332,17 @@ def write_alerts(root, new_alerts, now=None):
         "note": "Newest first. Nothing was moved; a person decides.",
         "alerts": alerts,
     }
+    ## Atomic replace so a reader never sees a half-written alert file.
     twu_scan.write_atomic(p, out)
     return str(p)
 
 
+## Directory names never descended into: VCS, caches, and our own output trees.
 EXPAND_SKIP_DIRS = SKIP_PARTS + ("receipts", "rules", "archive", "scans", "yara_rules", "__pycache__", "node_modules")
+## Repo-relative paths also excluded (health records written by this tool).
 EXPAND_SKIP_REL = ("data/health",)
+## Reserved key inside the state file holding the time of the last good pass;
+## it cannot collide with real entries, which are absolute paths.
 LAST_PASS_KEY = "__last_pass__"
 
 
@@ -313,6 +355,7 @@ def load_last_pass(root):
     Returns:
         float: Epoch timestamp of prior pass or 0.0.
     """
+    ## Anything that is not a number (corruption) is treated as 'never ran'.
     v = _load(_state_path(root), {}).get(LAST_PASS_KEY)
     return float(v) if isinstance(v, (int, float)) else 0.0
 
@@ -357,13 +400,18 @@ def expand_dirs(dirs, since_days=1.0, depth=4, max_files=2000, now=None, since_t
     Returns:
         list[str]: Candidate file paths matching modification criteria.
     """
+    ## Only files newer than BOTH the lookback window and the last completed pass.
     cutoff = max((now or time.time()) - since_days * 86400, since_ts)
+    ## Absolute forms of the repo-relative exclusions.
     skip_rel = [os.path.abspath(os.path.join(str(root), r)) for r in EXPAND_SKIP_REL] if root else []
     out = []
     for d in dirs:
+        ## Depth is measured relative to the starting directory by counting separators.
         base = os.path.abspath(d).rstrip(os.sep).count(os.sep)
         for r, ds, fs in os.walk(d, followlinks=False):
+            ## At the depth limit: clear ds in place so os.walk stops descending.
             if r.rstrip(os.sep).count(os.sep) - base >= depth:
+                ## Slice assignment (not rebinding) is required: os.walk honours in-place edits.
                 ds[:] = []
             ds[:] = [
                 x for x in ds
@@ -374,6 +422,7 @@ def expand_dirs(dirs, since_days=1.0, depth=4, max_files=2000, now=None, since_t
             for f in fs:
                 fp = os.path.join(r, f)
                 try:
+                    ## Symlinks are skipped; the max_files cap is a hard stop against huge trees.
                     if not os.path.islink(fp) and os.lstat(fp).st_mtime >= cutoff and len(out) < max_files:
                         out.append(fp)
                 except OSError:
@@ -414,12 +463,16 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
     Returns:
         dict: {verdict, scanned, skipped, receipt, alerts_file}
     """
+    ## Scanner is injectable so tests can run without real engines.
     scanner = scanner or twu_scan.scan
     root = Path(root)
     state_p = _state_path(root)
+    ## Persistent {path: [size, mtime_ns]} of files last scanned without error.
     state = _load(state_p, {})
     skipped, todo = [], []
+    ## De-duplicate: hooks often report the same path many times.
     seen = set()
+    ## Pre-wait signatures; compared after the single shared sleep.
     pending = {}  ## Map of path -> (size, mtime_ns) before shared wait
 
     for raw in paths:
@@ -427,6 +480,7 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
         if p in seen:
             continue
         seen.add(p)
+        ## Cheap, I/O-free filtering first.
         why = skip_reason(p, root)
         if not why:
             try:
@@ -436,6 +490,7 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
                 elif not stat.S_ISREG(st.st_mode):
                     why = "not a regular file"
                 elif st.st_size > max_bytes:
+                    ## Oversized files bypass the debounce but are still forwarded.
                     todo.append(p)  ## Let twu_scan report COULD-NOT-SCAN for oversized files
                     continue
                 else:
@@ -446,6 +501,7 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
             skipped.append({"path": p, "why": why})
 
     ## Execute single batch stabilization delay for all pending files
+    ## One sleep for the whole batch (not one per file).
     if pending and wait:
         sleeper(wait)
 
@@ -460,17 +516,21 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
                 "path": p,
                 "why": "still being written (size or time changed in %ss); the next event rescans it" % wait,
             })
+        ## JSON stores tuples as lists, hence the list() comparison.
         elif state.get(p) == list(after):
             skipped.append({"path": p, "why": "unchanged since last scan"})
         else:
             todo.append(p)
 
+    ## Empty todo => CLEAN with no scan (nothing new was eligible).
     verdict, files, receipt, alerts = "CLEAN", [], None, []
     if todo:
+        ## One engine invocation for the whole batch (engine start-up cost is high).
         doc = scanner(todo, root=root, max_bytes=max_bytes, timeout=timeout, **scan_kw)
         verdict, files, receipt = doc["verdict"], doc["files"], doc.get("receipt")
         now = time.time()
         for f in files:
+            ## Only genuine detections raise alerts; errors are retried next time instead.
             if f["verdict"] in ("SUSPICIOUS", "INFECTED"):
                 alerts.append({
                     "ts": now,
@@ -489,6 +549,7 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
                     pass
 
         ## Evict oldest state cache entries if size exceeds MAX_STATE limit
+        ## Dicts keep insertion order, so the first keys are the oldest entries.
         if len(state) > MAX_STATE:
             for k in [k for k in state if k != LAST_PASS_KEY][:len(state) - MAX_STATE]:
                 del state[k]
@@ -497,6 +558,7 @@ def scan_new(paths, root=REPO, scanner=None, max_bytes=DEFAULT_MAX_BYTES, wait=S
         except OSError:
             pass
 
+    ## Writes nothing (returns None) when there were no detections.
     alert_file = write_alerts(root, alerts)
     return {
         "verdict": verdict,
@@ -532,13 +594,17 @@ def gguf_header_scan(path, scanner=None, nbytes=GGUF_HEADER_BYTES, root=REPO):
         dict: {path, verdict, bytes_scanned, file_bytes, partial, findings, note}
     """
     scanner = scanner or twu_scan.scan
+    ## Full size is recorded so the result shows the pass was partial.
     size = os.path.getsize(path)
     with open(path, "rb") as f:
+        ## Reads at most nbytes: memory use is bounded regardless of model size.
         head = f.read(nbytes)
     with tempfile.TemporaryDirectory(prefix="twugguf.") as td:
+        ## Keep the original name/extension so extension-aware rules still apply.
         tmp = os.path.join(td, "header." + os.path.basename(path))
         with open(tmp, "wb") as g:
             g.write(head)
+        ## Real scanner: skip the receipt (the temp path would be meaningless afterwards).
         doc = scanner([tmp], root=root, write_receipt=False) if scanner is twu_scan.scan else scanner([tmp])
     v = doc["verdict"]
     return {
@@ -564,6 +630,7 @@ def list_volumes(base=None):
     Returns:
         list[str]: Discovered removable media partition mount paths.
     """
+    ## Typical removable-media mount roots on macOS and Linux.
     bases = [base] if base else ["/Volumes", "/media", "/run/media"]
     out = []
     for b in bases:
@@ -571,10 +638,12 @@ def list_volumes(base=None):
             continue
         for n in sorted(os.listdir(b)):
             p = os.path.join(b, n)
+            ## Skip symlinks so the system volume is not mistaken for a USB stick.
             if os.path.islink(p):
                 continue  ## e.g. /Volumes/Macintosh HD is a symlink to root
             if os.path.isdir(p) and (base or b != "/run/media"):
                 out.append(p)
+            ## udisks mounts as /run/media/<user>/<label>: go one level deeper.
             elif os.path.isdir(p):  ## Linux multi-user mount: /run/media/<user>/<label>
                 out += [
                     os.path.join(p, m)
@@ -603,25 +672,32 @@ def usb_scan(volumes=None, root=REPO, scanner=None, depth=USB_DEPTH, max_files=U
     Returns:
         dict: {volumes, verdict, files, warnings, too_deep, over_cap, receipt, alerts_file}
     """
+    ## Injectable for tests.
     scanner = scanner or twu_scan.scan
     vols = list(volumes) if volumes else list_volumes()
+    ## too_deep/over_cap record what was NOT scanned so the verdict can say so.
     files, warnings, too_deep, over_cap = [], [], [], []
 
     for v in vols:
+        ## Depth baseline = separators in the volume path.
         base_depth = v.rstrip(os.sep).count(os.sep)
         for r, ds, fs in os.walk(v, followlinks=False):
             d = r.rstrip(os.sep).count(os.sep) - base_depth
+            ## Never follow directory symlinks on untrusted media.
             ds[:] = [x for x in sorted(ds) if not os.path.islink(os.path.join(r, x))]
+            ## Directories beyond the limit are listed, not silently ignored.
             if d >= depth:
                 if ds:
                     too_deep.extend(os.path.join(r, x) for x in ds)
                 ds[:] = []
             for f in sorted(fs):
                 fp = os.path.join(r, f)
+                ## Classic Windows autorun worm vector; flagged even though it is never executed.
                 if f.lower() == "autorun.inf":
                     warnings.append("autorun.inf on %s (Windows auto-run file; never open it)" % v)
                 if os.path.islink(fp):
                     continue
+                ## Past the cap files are recorded as unscanned.
                 if len(files) >= max_files:
                     over_cap.append(fp)
                 else:
@@ -634,6 +710,7 @@ def usb_scan(volumes=None, root=REPO, scanner=None, depth=USB_DEPTH, max_files=U
     elif not vols:
         verdict = "CLEAN"
 
+    ## Incomplete coverage may never read as CLEAN: escalate to COULD-NOT-SCAN.
     if too_deep or over_cap:
         verdict = _worse(verdict, "COULD-NOT-SCAN")
 
@@ -673,6 +750,7 @@ def _render(res, label):
     Returns:
         str: Human-readable terminal string.
     """
+    ## Works for both result shapes: scan-new uses 'scanned', usb uses 'files'.
     lines = ["VERDICT: %s" % res["verdict"]]
     for f in res.get("scanned", res.get("files", [])):
         lines.append("%s: %s" % (f["verdict"], f["path"]))
@@ -703,6 +781,7 @@ def main(argv=None):
     Returns:
         int: POSIX exit status code.
     """
+    ## The module docstring's first line doubles as the CLI description.
     ap = argparse.ArgumentParser(prog="twu_scan_event.py", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -723,6 +802,7 @@ def main(argv=None):
     u.add_argument("--json", action="store_true", help="Output JSON result")
 
     ns = ap.parse_args(argv)
+    ## Captured before scanning so last_pass never skips files changed mid-scan.
     t0 = time.time()
 
     if ns.cmd == "scan-new":
@@ -733,6 +813,7 @@ def main(argv=None):
             "yes" if load_last_pass(root) else "no (first run, last %g day)" % ns.since_days,
         ), flush=True)
 
+        ## Explicit event paths plus files discovered by expanding --dir roots.
         paths = list(ns.paths) + expand_dirs(ns.dir, ns.since_days, since_ts=load_last_pass(root), root=root)
         if not paths:
             save_last_pass(root, t0)
@@ -740,9 +821,11 @@ def main(argv=None):
             return 0
 
         res = scan_new(paths, root=root, max_bytes=ns.max_mb << 20, wait=0 if ns.no_wait else STABLE_SECONDS)
+        ## Only advance last_pass on a conclusive run so failed files are retried.
         if res["verdict"] != "COULD-NOT-SCAN":
             save_last_pass(root, t0)
 
+        ## Per-verdict tally for the one-line summary.
         n = {}
         for f in res["scanned"]:
             n[f["verdict"]] = n.get(f["verdict"], 0) + 1
@@ -759,5 +842,6 @@ def main(argv=None):
     return twu_scan.exit_code(res["verdict"])
 
 
+## Run the CLI only when executed directly.
 if __name__ == "__main__":
     sys.exit(main())
